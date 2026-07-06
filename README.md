@@ -288,4 +288,4 @@ rg -n "outlook.com|refresh_token|access_token|id_token|session_token|workspace" 
 
 ## 致谢
 
-核心注册流程参考了社区围绕 `chatgpt2api` 的实现，并在此基础上增加了 workspace 上下文处理、Outlook 别名支持和 Sub2API 导出能力。
+感谢 [LINUX DO](https://linux.do/) 社区的交流与支持。
