@@ -16,11 +16,11 @@ from urllib.parse import parse_qs, urlparse
 
 import yaml
 
-from chatgpt_register_sub2api import __version__
-from chatgpt_register_sub2api.config import load_config
-from chatgpt_register_sub2api.webui.jobs import JobManager
-from chatgpt_register_sub2api.webui.redact import redact_object
-from chatgpt_register_sub2api.webui.terminal import run_terminal_command
+from chatgpt_register_k12 import __version__
+from chatgpt_register_k12.config import load_config
+from chatgpt_register_k12.webui.jobs import JobManager
+from chatgpt_register_k12.webui.redact import redact_object
+from chatgpt_register_k12.webui.terminal import run_terminal_command
 
 
 logger = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
     manager: JobManager
     base_dir: Path
 
-    server_version = "chatgpt-register-webui/0.1"
+    server_version = "chatgpt-register-k12-webui/0.1"
 
     def log_message(self, fmt: str, *args) -> None:
         logger.info(fmt, *args)

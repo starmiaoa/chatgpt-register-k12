@@ -7,19 +7,19 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from chatgpt_register_sub2api.cli import _prepare_run_archive
-from chatgpt_register_sub2api.login.login_flow import (
+from chatgpt_register_k12.cli import _prepare_run_archive
+from chatgpt_register_k12.login.login_flow import (
     _extract_code_from_response,
     _page_type_from_response_url,
 )
-from chatgpt_register_sub2api.pipeline import (
+from chatgpt_register_k12.pipeline import (
     _apply_workspace_export_context,
     _fetch_account_context,
     run_export,
     run_full_pipeline,
     run_refresh_tokens,
 )
-from chatgpt_register_sub2api.register.mail_provider import (
+from chatgpt_register_k12.register.mail_provider import (
     OutlookTokenProvider,
     _entry_has_address,
     _fill_mailbox_credentials,
@@ -28,7 +28,7 @@ from chatgpt_register_sub2api.register.mail_provider import (
     _plus_alias_address,
     mark_mailbox_result,
 )
-from chatgpt_register_sub2api.workspace.joiner import join_workspace
+from chatgpt_register_k12.workspace.joiner import join_workspace
 
 
 class FakeResponse:
@@ -465,7 +465,7 @@ class OfflineFlowTests(unittest.TestCase):
             }
 
             with patch(
-                "chatgpt_register_sub2api.pipeline._create_http_session",
+                "chatgpt_register_k12.pipeline._create_http_session",
                 return_value=WorkspaceCheckSession("workspace-id"),
             ):
                 refreshed = run_refresh_tokens(config, [account])
@@ -564,7 +564,7 @@ class OfflineFlowTests(unittest.TestCase):
             )
 
             with patch(
-                "chatgpt_register_sub2api.pipeline._create_http_session",
+                "chatgpt_register_k12.pipeline._create_http_session",
                 return_value=session,
             ):
                 json_str, _ = run_export(config, [good, bad])
@@ -609,13 +609,13 @@ class OfflineFlowTests(unittest.TestCase):
             output_file = str(Path(tmp) / "bundle.json")
 
             with patch(
-                "chatgpt_register_sub2api.pipeline.run_register",
+                "chatgpt_register_k12.pipeline.run_register",
                 return_value=accounts,
             ), patch(
-                "chatgpt_register_sub2api.pipeline.run_join_workspace",
+                "chatgpt_register_k12.pipeline.run_join_workspace",
                 return_value=accounts,
             ), patch(
-                "chatgpt_register_sub2api.pipeline.run_refresh_tokens",
+                "chatgpt_register_k12.pipeline.run_refresh_tokens",
                 return_value=accounts,
             ):
                 summary = run_full_pipeline(

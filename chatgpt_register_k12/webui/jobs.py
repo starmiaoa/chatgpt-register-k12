@@ -12,12 +12,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from chatgpt_register_sub2api.config import load_config
-from chatgpt_register_sub2api.export.formats import (
+from chatgpt_register_k12.config import load_config
+from chatgpt_register_k12.export.formats import (
     count_exported_json,
     output_filename_from_config,
 )
-from chatgpt_register_sub2api.pipeline import (
+from chatgpt_register_k12.pipeline import (
     PipelineCancelled,
     create_run_output_dir,
     load_accounts,
@@ -31,7 +31,7 @@ from chatgpt_register_sub2api.pipeline import (
     save_accounts,
     workspace_state_entries,
 )
-from chatgpt_register_sub2api.webui.redact import redact_object, redact_text
+from chatgpt_register_k12.webui.redact import redact_object, redact_text
 
 
 logger = logging.getLogger(__name__)

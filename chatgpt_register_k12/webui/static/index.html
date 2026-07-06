@@ -3,14 +3,14 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>ChatGPT Register Sub2API</title>
+    <title>ChatGPT Register K12</title>
     <link rel="stylesheet" href="/static/style.css">
   </head>
   <body>
     <main class="shell">
       <header class="topbar">
         <div>
-          <h1>ChatGPT Register Sub2API</h1>
+          <h1>ChatGPT Register K12</h1>
           <p id="health">Connecting...</p>
         </div>
         <button id="refreshJobs" type="button">刷新</button>
@@ -48,7 +48,7 @@
 
         <section class="panel">
           <h2>选择账号来源</h2>
-          <p class="hint">两种模式都会加入 Workspace、刷新/校验 Token，并导出 Sub2API JSON。</p>
+          <p class="hint">两种模式都会加入 Workspace、刷新/校验 Token，并按选择的格式导出 JSON。</p>
           <div class="mode-list" role="radiogroup" aria-label="任务模式">
             <label class="mode-option">
               <input name="job_mode" type="radio" value="run" checked>
@@ -85,7 +85,7 @@
       <section class="panel">
         <h2>终端</h2>
         <div class="terminal-input">
-          <input id="terminalCommand" spellcheck="false" placeholder="python -m chatgpt_register_sub2api.cli --help">
+          <input id="terminalCommand" spellcheck="false" placeholder="python -m chatgpt_register_k12.cli --help">
           <button id="runTerminal" type="button">运行</button>
         </div>
         <pre id="terminalOutput" class="terminal"></pre>

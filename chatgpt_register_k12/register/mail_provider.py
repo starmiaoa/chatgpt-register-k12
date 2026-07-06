@@ -22,12 +22,12 @@ from typing import Any, Callable
 
 from curl_cffi import requests
 
-from chatgpt_register_sub2api.workspace_state import (
+from chatgpt_register_k12.workspace_state import (
     claim_workspace_email,
     set_workspace_email_state,
     workspace_email_available,
 )
-from chatgpt_register_sub2api.utils.proxy import normalize_proxy_url
+from chatgpt_register_k12.utils.proxy import normalize_proxy_url
 
 # ── Data directory (stores pool state) ─────────────────────────────
 

@@ -4,7 +4,7 @@ The complete flow for one account:
   [1] Register account → get personal-scope tokens
   [2] Join parent K12 workspace → auto-accepted
   [3] Refresh/check account info, or explicit Team re-login when enabled
-  [4] Export usable tokens as sub2api JSON
+  [4] Export usable tokens as the configured JSON format
 
 Each account proceeds independently through all 4 stages.
 Results are written to registered_accounts.json after each success.
@@ -21,22 +21,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from chatgpt_register_sub2api.register.mail_provider import configured_mailboxes
-from chatgpt_register_sub2api.register.registrar import register_worker
-from chatgpt_register_sub2api.workspace.joiner import join_workspaces
-from chatgpt_register_sub2api.login.login_flow import (
+from chatgpt_register_k12.register.mail_provider import configured_mailboxes
+from chatgpt_register_k12.register.registrar import register_worker
+from chatgpt_register_k12.workspace.joiner import join_workspaces
+from chatgpt_register_k12.login.login_flow import (
     PasswordRequiredError,
     re_login_email_otp_for_team_token,
     re_login_for_team_token,
 )
-from chatgpt_register_sub2api.export.formats import (
+from chatgpt_register_k12.export.formats import (
     count_exported_json,
     export_accounts_json,
     export_format_from_config,
     output_filename_from_config,
 )
-from chatgpt_register_sub2api.utils.proxy import normalize_proxy_url
-from chatgpt_register_sub2api.workspace_state import (
+from chatgpt_register_k12.utils.proxy import normalize_proxy_url
+from chatgpt_register_k12.workspace_state import (
     claim_workspace_email,
     get_workspace_email_state,
     list_workspace_entries,
@@ -1644,7 +1644,7 @@ def run_full_pipeline(
     Args:
         config: Full config dict from config.yaml
         count: Override registration count
-        output_file: Override sub2api output path
+        output_file: Override export output path
         accounts_file: Override accounts storage path
 
     Returns:

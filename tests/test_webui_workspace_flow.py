@@ -9,16 +9,16 @@ from threading import Thread
 from unittest.mock import patch
 from urllib.request import Request, urlopen
 
-from chatgpt_register_sub2api.login.login_flow import (
+from chatgpt_register_k12.login.login_flow import (
     PasswordRequiredError,
     _complete_login_flow,
 )
-from chatgpt_register_sub2api.pipeline import run_export
-from chatgpt_register_sub2api.webui.terminal import run_terminal_command
-from chatgpt_register_sub2api.webui.redact import redact_object, redact_text
-from chatgpt_register_sub2api.webui.jobs import JobManager
-from chatgpt_register_sub2api.webui.server import WebUIHandler
-from chatgpt_register_sub2api.workspace_state import (
+from chatgpt_register_k12.pipeline import run_export
+from chatgpt_register_k12.webui.terminal import run_terminal_command
+from chatgpt_register_k12.webui.redact import redact_object, redact_text
+from chatgpt_register_k12.webui.jobs import JobManager
+from chatgpt_register_k12.webui.server import WebUIHandler
+from chatgpt_register_k12.workspace_state import (
     get_workspace_email_state,
     set_workspace_email_state,
     workspace_email_available,
@@ -134,7 +134,7 @@ class ExportHealthFallbackTests(unittest.TestCase):
             }
 
             with patch(
-                "chatgpt_register_sub2api.pipeline._create_http_session",
+                "chatgpt_register_k12.pipeline._create_http_session",
                 return_value=session,
             ):
                 json_str, actual_path = run_export(config, [account], out)

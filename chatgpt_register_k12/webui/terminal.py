@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from chatgpt_register_sub2api.webui.redact import redact_text
+from chatgpt_register_k12.webui.redact import redact_text
 
 
 def run_terminal_command(

@@ -17,7 +17,7 @@ from typing import Any
 
 from curl_cffi import requests
 
-from chatgpt_register_sub2api.utils.proxy import normalize_proxy_url
+from chatgpt_register_k12.utils.proxy import normalize_proxy_url
 
 CHATGPT_BASE = "https://chatgpt.com"
 

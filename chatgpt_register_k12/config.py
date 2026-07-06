@@ -1,4 +1,4 @@
-"""Configuration loader for chatgpt-register-sub2api.
+"""Configuration loader for chatgpt-register-k12.
 
 Loads config.yaml, validates, and merges with CLI overrides.
 """

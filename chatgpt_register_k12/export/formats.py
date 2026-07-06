@@ -9,11 +9,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from chatgpt_register_sub2api.export.sub2api import (
+from chatgpt_register_k12.export.sub2api import (
     build_sub2api_bundle,
     build_credentials,
 )
-from chatgpt_register_sub2api.utils.jwt import extract_account_info
+from chatgpt_register_k12.utils.jwt import extract_account_info
 
 
 DEFAULT_EXPORT_FORMAT = "sub2api"

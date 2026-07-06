@@ -21,20 +21,20 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
-from chatgpt_register_sub2api.register.headers import json_headers, navigate_headers
-from chatgpt_register_sub2api.register.mail_provider import (
+from chatgpt_register_k12.register.headers import json_headers, navigate_headers
+from chatgpt_register_k12.register.mail_provider import (
     create_mailbox,
     mark_mailbox_result,
     release_mailbox,
     wait_for_code,
 )
-from chatgpt_register_sub2api.register.session import (
+from chatgpt_register_k12.register.session import (
     create_register_session,
     is_cloudflare_challenge,
     request_with_retry,
 )
-from chatgpt_register_sub2api.utils.pkce import generate_pkce
-from chatgpt_register_sub2api.utils.sentinel import build_sentinel_token
+from chatgpt_register_k12.utils.pkce import generate_pkce
+from chatgpt_register_k12.utils.sentinel import build_sentinel_token
 
 # ── OpenAI Auth constants ───────────────────────────────────────────
 
@@ -198,7 +198,7 @@ class PlatformRegistrar:
                 f"HTTP {status}. Configure proxy.flaresolverr_url."
             )
 
-        from chatgpt_register_sub2api.register.session import (
+        from chatgpt_register_k12.register.session import (
             refresh_clearance_and_retry,
         )
         from urllib.parse import urlparse

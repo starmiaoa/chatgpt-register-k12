@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 
 from curl_cffi import requests
 
-from chatgpt_register_sub2api.utils.proxy import (
+from chatgpt_register_k12.utils.proxy import (
     ClearanceBundle,
     FlareSolverrClearanceProvider,
     apply_clearance_to_session,

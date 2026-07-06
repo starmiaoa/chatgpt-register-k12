@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from chatgpt_register_sub2api.utils.jwt import extract_account_info
+from chatgpt_register_k12.utils.jwt import extract_account_info
 
 
 def _now_iso() -> str:

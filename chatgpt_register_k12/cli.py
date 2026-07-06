@@ -1,4 +1,4 @@
-"""CLI entry point for chatgpt-register-sub2api.
+"""CLI entry point for chatgpt-register-k12.
 
 Subcommands:
   init             Write default config.yaml
@@ -18,17 +18,17 @@ import logging
 import sys
 from pathlib import Path
 
-from chatgpt_register_sub2api import __version__
-from chatgpt_register_sub2api.config import (
+from chatgpt_register_k12 import __version__
+from chatgpt_register_k12.config import (
     DEFAULT_CONFIG_FILE,
     generate_default_config,
     load_config,
 )
-from chatgpt_register_sub2api.export.formats import (
+from chatgpt_register_k12.export.formats import (
     output_filename_from_config,
     supported_export_formats,
 )
-from chatgpt_register_sub2api.pipeline import (
+from chatgpt_register_k12.pipeline import (
     create_run_output_dir,
     load_accounts,
     run_export,
@@ -39,7 +39,7 @@ from chatgpt_register_sub2api.pipeline import (
     run_register,
     save_accounts,
 )
-from chatgpt_register_sub2api.webui.server import run_server
+from chatgpt_register_k12.webui.server import run_server
 
 
 def setup_logging(config: dict, verbose: bool = False) -> None:
@@ -251,7 +251,7 @@ def cmd_refresh(args) -> int:
 
 
 def cmd_export(args) -> int:
-    """Export to sub2api JSON."""
+    """Export accounts JSON."""
     config = load_config(args.config)
     if args.format:
         config.setdefault("export", {})["format"] = args.format
