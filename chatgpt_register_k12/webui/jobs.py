@@ -319,6 +319,8 @@ class JobManager:
                 job.artifacts["accounts_file"] = str(summary.get("accounts_file") or accounts_file)
                 if summary.get("output_file"):
                     job.artifacts["output_file"] = str(summary["output_file"])
+                if int(summary.get("registered") or 0) <= 0:
+                    raise RuntimeError("No accounts registered — pipeline aborted")
             elif job.action == "existing-token":
                 job.stage = "login-existing"
                 self._raise_if_cancelled(job)

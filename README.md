@@ -97,7 +97,8 @@ http://127.0.0.1:8787/
 - workspace ID
 - 导出格式
 - 数量和线程
-- Outlook 别名设置
+- 邮箱类型：Outlook Token / Gmail App Password
+- 邮箱别名设置
 
 页面提供两个主按钮：
 
@@ -106,7 +107,9 @@ http://127.0.0.1:8787/
 有账号登录获得新的 token
 ```
 
-`无账号注册` 会执行注册、join、refresh/check 和导出。`有账号登录获得新的 token` 会用邮箱验证码登录已有账号，重新获取 token 后执行 join、refresh/check 和导出。导出格式默认是 Sub2API，可在页面的“导出格式”下拉框切换。
+`无账号注册` 会执行注册、join、refresh/check 和导出。`有账号登录获得新的 token` 会先尝试邮箱验证码登录；如果 OpenAI 要求密码，会自动使用项目内置固定密码 `#A1234567890` 登录并重新获取 token，然后执行 join、refresh/check 和导出。导出格式默认是 Sub2API，可在页面的“导出格式”下拉框切换。
+
+新注册账号会使用项目内置固定密码 `#A1234567890`，方便之后走密码登录重新获取 token；这个设置不会修改已经注册过的账号密码。
 
 输出文件会进入：
 
@@ -224,7 +227,15 @@ Gmail OAuth 池格式：
 email----client_id----client_secret----refresh_token
 ```
 
-### Outlook 别名
+Gmail App Password 池格式：
+
+```text
+email@gmail.com----16位App Password
+```
+
+App Password 中间的空格可以保留，程序会自动去掉。使用 Gmail App Password 前，需要 Gmail 账号已开启两步验证、已创建 App Password，并允许 IMAP 读取。WebUI 里切到 `Gmail App Password` 后填写这一种格式即可。
+
+### 邮箱别名
 
 ```yaml
 alias_enabled: true
@@ -233,10 +244,10 @@ alias_limit_per_mailbox: 5
 
 含义：
 
-- `alias_enabled`：是否启用 Outlook plus alias
+- `alias_enabled`：是否启用 plus alias
 - `alias_limit_per_mailbox`：每个主邮箱最多使用多少个注册地址，包含主邮箱本身
 
-验证码仍从主 Outlook 邮箱读取；注册邮箱地址则按具体别名区分。
+验证码仍从主邮箱读取；注册邮箱地址则按具体别名区分。Outlook Token 和 Gmail App Password 都支持 `user+1@example.com` 这类 plus alias。
 
 默认建议每个主邮箱使用 5 个地址（主邮箱 + `+1` 到 `+4`）。如果你明确要尝试第 6 个地址，可以把 `alias_limit_per_mailbox` 改成 `6`，但 Outlook/目标服务对第 6 个别名更容易出现验证码超时或后续 token 吊销。
 
@@ -266,12 +277,12 @@ workspace:
 sub2api:
   require_team_tokens: auto
   health_check: true
-  health_check_endpoint: models
+  health_check_endpoint: check
   health_check_retries: 2
   health_check_delay_seconds: 5
 ```
 
-`health_check` 开启后，导出前会用 ChatGPT backend 做一次轻量检查。已经被服务端吊销、返回 `token_invalidated`、或检查接口异常的账号不会写入最终导出 JSON。因此导出数量可能少于注册成功数量，这是为了避免导入后立刻 401。
+`health_check` 开启后，导出前会用 ChatGPT backend 做一次轻量检查。默认 `check` 会优先确认账号仍在 K12/workspace 上下文里；已经被服务端吊销、返回 `token_revoked` / `token_invalidated`、或检查接口异常的账号不会写入最终导出 JSON。因此导出数量可能少于注册成功数量，这是为了避免导入后立刻 401。
 
 ### 输出归档
 

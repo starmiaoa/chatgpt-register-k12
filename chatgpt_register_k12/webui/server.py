@@ -55,6 +55,15 @@ class WebUIHandler(BaseHTTPRequestHandler):
     server_version = "chatgpt-register-k12-webui/0.1"
 
     def log_message(self, fmt: str, *args) -> None:
+        request_line = str(args[0]) if args else ""
+        status_code = str(args[1]) if len(args) > 1 else ""
+        is_success = status_code.startswith(("2", "3"))
+        is_polling = (
+            request_line.startswith("GET /api/jobs")
+            or request_line.startswith("GET /api/health")
+        )
+        if is_polling and is_success:
+            return
         logger.info(fmt, *args)
 
     def do_GET(self) -> None:  # noqa: N802
@@ -151,7 +160,11 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     parallel["join_threads"] = value
                     parallel["refresh_threads"] = value
                     parallel["login_threads"] = value
-                mailboxes = str(body.get("outlook_mailboxes") or "").strip()
+                mail_provider = str(body.get("mail_provider") or "outlook").strip().lower()
+                if mail_provider not in {"outlook", "gmail"}:
+                    mail_provider = "outlook"
+                outlook_mailboxes = str(body.get("outlook_mailboxes") or "").strip()
+                gmail_mailboxes = str(body.get("gmail_mailboxes") or "").strip()
                 alias_enabled = bool(body.get("alias_enabled", False))
                 alias_limit = max(1, int(body.get("alias_limit_per_mailbox") or 5))
                 providers = config.setdefault("mail", {}).setdefault("providers", [])
@@ -170,12 +183,43 @@ class WebUIHandler(BaseHTTPRequestHandler):
                         "mode": "auto",
                     }
                     providers.insert(0, outlook)
+                gmail_password = next(
+                    (
+                        item for item in providers
+                        if isinstance(item, dict) and item.get("type") == "gmail_password"
+                    ),
+                    None,
+                )
+                if gmail_password is None:
+                    gmail_password = {
+                        "type": "gmail_password",
+                        "enable": False,
+                        "label": "Gmail App Password Pool",
+                        "imap_host": "imap.gmail.com",
+                        "message_limit": 10,
+                    }
+                    providers.append(gmail_password)
                 outlook["enable"] = True
                 outlook["mode"] = str(outlook.get("mode") or "auto")
                 outlook["alias_enabled"] = alias_enabled
                 outlook["alias_limit_per_mailbox"] = alias_limit
-                if mailboxes:
-                    outlook["mailboxes"] = mailboxes
+                if outlook_mailboxes:
+                    outlook["mailboxes"] = outlook_mailboxes
+                gmail_password["enable"] = mail_provider == "gmail"
+                gmail_password["alias_enabled"] = alias_enabled
+                gmail_password["alias_limit_per_mailbox"] = alias_limit
+                gmail_password["imap_host"] = str(
+                    gmail_password.get("imap_host") or "imap.gmail.com"
+                )
+                gmail_password["message_limit"] = int(
+                    gmail_password.get("message_limit") or 10
+                )
+                if gmail_mailboxes:
+                    gmail_password["mailboxes"] = gmail_mailboxes
+                outlook["enable"] = mail_provider == "outlook"
+                for provider in providers:
+                    if isinstance(provider, dict) and provider.get("type") == "gmail_oauth":
+                        provider["enable"] = False
                 config["mail"]["alias_enabled"] = alias_enabled
                 config["mail"]["alias_limit_per_mailbox"] = alias_limit
                 config.setdefault("web", {})["host"] = str(body.get("host") or "127.0.0.1")

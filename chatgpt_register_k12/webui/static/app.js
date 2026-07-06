@@ -7,10 +7,12 @@ const terminalOutputEl = document.querySelector("#terminalOutput");
 const cancelJobEl = document.querySelector("#cancelJob");
 const accountsFileEl = document.querySelector("#accountsFile");
 const outputFileEl = document.querySelector("#outputFile");
+const providerInputs = document.querySelectorAll('input[name="mail_provider"]');
 
 let currentJobId = "";
 let logSeq = 0;
 let pollTimer = null;
+let pollToken = 0;
 const openedFolderJobs = new Set();
 
 function formData() {
@@ -25,15 +27,24 @@ function formData() {
     workspace_ids: workspaceIds,
     proxy_url: data.get("proxy_url") || "",
     export_format: data.get("export_format") || "sub2api",
+    mail_provider: data.get("mail_provider") || "outlook",
     count: Number(data.get("count") || 10),
     threads: Number(data.get("threads") || 2),
     alias_enabled: Boolean(data.get("alias_enabled")),
     alias_limit_per_mailbox: Number(data.get("alias_limit_per_mailbox") || 5),
     outlook_mailboxes: data.get("outlook_mailboxes") || "",
+    gmail_mailboxes: data.get("gmail_mailboxes") || "",
     accounts_file: accountsFileEl?.value || "",
     input_file: accountsFileEl?.value || "",
     output_file: outputFileEl?.value || ""
   };
+}
+
+function syncProviderPanels() {
+  const selected = form.querySelector('input[name="mail_provider"]:checked')?.value || "outlook";
+  document.querySelectorAll("[data-provider-panel]").forEach((panel) => {
+    panel.hidden = panel.dataset.providerPanel !== selected;
+  });
 }
 
 async function api(path, options = {}) {
@@ -97,6 +108,8 @@ async function saveConfig() {
 }
 
 async function createJob(action) {
+  stopPolling();
+  pollToken += 1;
   logSeq = 0;
   logsEl.textContent = "";
   const payload = { ...formData(), action };
@@ -106,14 +119,16 @@ async function createJob(action) {
   });
   currentJobId = data.job.id;
   renderStatus(data);
-  startPolling();
+  startPolling(currentJobId, pollToken);
 }
 
-async function pollJob() {
-  if (!currentJobId) return;
-  const data = await api(`/api/jobs/${currentJobId}`);
+async function pollJob(jobId = currentJobId, token = pollToken) {
+  if (!jobId) return;
+  const data = await api(`/api/jobs/${jobId}`);
+  if (jobId !== currentJobId || token !== pollToken) return;
   renderStatus(data);
-  const logs = await api(`/api/jobs/${currentJobId}/logs?after=${logSeq}`);
+  const logs = await api(`/api/jobs/${jobId}/logs?after=${logSeq}`);
+  if (jobId !== currentJobId || token !== pollToken) return;
   for (const item of logs.logs || []) {
     logSeq = Math.max(logSeq, item.seq || 0);
     logsEl.textContent += `[${item.level}] ${item.message}\n`;
@@ -122,19 +137,24 @@ async function pollJob() {
   const status = data.job?.status;
   if (["succeeded", "failed", "cancelled"].includes(status)) {
     if (status === "succeeded") await openRunFolder(data.job);
-    clearInterval(pollTimer);
-    pollTimer = null;
+    if (jobId === currentJobId && token === pollToken) stopPolling();
   }
 }
 
-function startPolling() {
+function stopPolling() {
   if (pollTimer) clearInterval(pollTimer);
+  pollTimer = null;
+}
+
+function startPolling(jobId = currentJobId, token = pollToken) {
+  stopPolling();
   pollTimer = setInterval(() => {
-    pollJob().catch((err) => {
+    pollJob(jobId, token).catch((err) => {
+      if (jobId !== currentJobId || token !== pollToken) return;
       logsEl.textContent += `[ERROR] ${err.message}\n`;
     });
   }, 1200);
-  pollJob().catch(() => {});
+  pollJob(jobId, token).catch(() => {});
 }
 
 document.querySelectorAll("[data-action]").forEach((button) => {
@@ -169,16 +189,20 @@ document.querySelector("#startSelectedJob")?.addEventListener("click", async () 
 
 cancelJobEl?.addEventListener("click", async () => {
   if (!currentJobId) return;
+  const jobId = currentJobId;
+  const token = pollToken;
   try {
-    const data = await api(`/api/jobs/${currentJobId}/cancel`, {
+    const data = await api(`/api/jobs/${jobId}/cancel`, {
       method: "POST",
       body: JSON.stringify({})
     });
+    if (jobId !== currentJobId || token !== pollToken) return;
     logsEl.textContent += data.ok
       ? "[WARNING] 已请求中断，当前网络请求结束后会停止。\n"
       : "[WARNING] 当前任务无法中断。\n";
-    await pollJob();
+    await pollJob(jobId, token);
   } catch (err) {
+    if (jobId !== currentJobId || token !== pollToken) return;
     logsEl.textContent += `[ERROR] ${err.message}\n`;
   }
 });
@@ -221,4 +245,9 @@ terminalCommandEl.addEventListener("keydown", (event) => {
   }
 });
 
+providerInputs.forEach((input) => {
+  input.addEventListener("change", syncProviderPanels);
+});
+
+syncProviderPanels();
 refreshHealth();

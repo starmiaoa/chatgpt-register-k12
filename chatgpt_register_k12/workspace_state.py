@@ -15,7 +15,7 @@ from typing import Any
 
 
 STATE_FILENAME = "workspace_account_state.json"
-IN_USE_STALE_SECONDS = 3600
+IN_USE_STALE_SECONDS = 300
 BLOCKING_STATES = {
     "in_use",
     "registered",

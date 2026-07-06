@@ -22,9 +22,13 @@ from pathlib import Path
 from typing import Any
 
 from chatgpt_register_k12.register.mail_provider import configured_mailboxes
-from chatgpt_register_k12.register.registrar import register_worker
+from chatgpt_register_k12.register.registrar import (
+    project_registration_password,
+    register_worker,
+)
 from chatgpt_register_k12.workspace.joiner import join_workspaces
 from chatgpt_register_k12.login.login_flow import (
+    LoginError,
     PasswordRequiredError,
     re_login_email_otp_for_team_token,
     re_login_for_team_token,
@@ -62,15 +66,32 @@ WORKSPACE_PLAN_TYPES = {
     "team",
 }
 DEFAULT_WORKSPACE_EXPORT_PLAN = "k12"
-DEFAULT_HEALTH_CHECK_ENDPOINT = "models"
+DEFAULT_HEALTH_CHECK_ENDPOINT = "check"
 HEALTH_CHECK_ENDPOINTS = {
     "check": "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27",
     "models": "https://chatgpt.com/backend-api/models",
 }
 TOKEN_INVALID_MARKERS = (
+    "token auth failed",
+    "token authentication failed",
+    "check api token auth failed",
+    "token_revoked",
     "token_invalidated",
+    "invalidated oauth token",
     "authentication token has been invalidated",
+    "token has been invalidated",
     "please try signing in again",
+)
+OPENAI_AUTH_BASE = "https://auth.openai.com"
+PLATFORM_BASE = "https://platform.openai.com"
+PLATFORM_OAUTH_CLIENT_ID = "app_2SKx67EdpoN0G6j64rFvigXD"
+PLATFORM_AUTH0_CLIENT = (
+    "eyJuYW1lIjoiYXV0aDAtc3BhLWpzIiwidmVyc2lvbiI6IjEuMjEuMCJ9"
+)
+PLATFORM_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/145.0.0.0 Safari/537.36"
 )
 
 
@@ -129,6 +150,16 @@ def _mail_config_with_proxy(config: dict[str, Any]) -> dict[str, Any]:
     if workspace_ids:
         mail_cfg["workspace_id"] = workspace_ids[0]
         mail_cfg["workspace_state_file"] = str(workspace_state_path(config))
+    return mail_cfg
+
+
+def _mail_config_for_job(
+    config: dict[str, Any],
+    cancel_event: threading.Event | None = None,
+) -> dict[str, Any]:
+    mail_cfg = _mail_config_with_proxy(config)
+    if cancel_event is not None:
+        mail_cfg["_cancel_event"] = cancel_event
     return mail_cfg
 
 
@@ -216,6 +247,42 @@ def _bool_config_value(value: Any, default: bool = False) -> bool:
     if text in {"0", "false", "no", "off", "n"}:
         return False
     return default
+
+
+def _should_fallback_to_project_password(error: Exception) -> bool:
+    if isinstance(error, PasswordRequiredError):
+        return True
+    if not isinstance(error, LoginError):
+        return False
+    detail = str(error or "").lower()
+    return any(
+        marker in detail
+        for marker in (
+            "password",
+            "unsupported login continuation page: error",
+            "auth error page",
+            "otp-only login",
+        )
+    )
+
+
+def _existing_login_with_project_password(
+    *,
+    email: str,
+    mail_config: dict[str, Any],
+    proxy: str,
+    flaresolverr_url: str,
+    workspace_id: str = "",
+) -> dict[str, Any]:
+    logger.info(f"[{email}] Trying project fixed password login")
+    return re_login_for_team_token(
+        email=email,
+        password=project_registration_password(),
+        mail_config=mail_config,
+        proxy=proxy,
+        flaresolverr_url=flaresolverr_url,
+        workspace_id=workspace_id,
+    )
 
 
 def _parallel_threads(config: dict[str, Any], key: str, default: int = 1) -> int:
@@ -311,9 +378,9 @@ def _fetch_account_context(
     if resp.status_code != 200:
         detail = _response_excerpt(resp)
         suffix = f", body={detail}" if detail else ""
-        if resp.status_code in (401, 403) and _token_invalidated_detail(detail):
+        if resp.status_code in (401, 403):
             raise RuntimeError(
-                f"check API token invalidated: HTTP {resp.status_code}{suffix}"
+                f"check API token auth failed: HTTP {resp.status_code}{suffix}"
             )
         raise RuntimeError(f"check API failed: HTTP {resp.status_code}{suffix}")
 
@@ -592,10 +659,98 @@ def _check_export_token_health(
     detail = _response_excerpt(resp)
     if resp.status_code == 200:
         return True, "ok"
-    if resp.status_code in (401, 403) and _token_invalidated_detail(detail):
-        return False, f"token invalidated: HTTP {resp.status_code}, body={detail}"
+    if resp.status_code in (401, 403):
+        suffix = f", body={detail}" if detail else ""
+        return False, f"token auth failed: HTTP {resp.status_code}{suffix}"
     suffix = f", body={detail}" if detail else ""
     return False, f"health check failed: HTTP {resp.status_code}{suffix}"
+
+
+def _apply_refreshed_token_payload(
+    account: dict[str, Any],
+    data: dict[str, Any],
+) -> bool:
+    access_token = str(data.get("access_token") or "").strip()
+    if not access_token:
+        return False
+    account["access_token"] = access_token
+    new_refresh = str(data.get("refresh_token") or "").strip()
+    if new_refresh:
+        account["refresh_token"] = new_refresh
+    id_token = str(data.get("id_token") or "").strip()
+    if id_token:
+        account["id_token"] = id_token
+    return True
+
+
+def _parse_token_refresh_response(resp: Any, endpoint_label: str) -> tuple[bool, str, dict[str, Any]]:
+    detail = _response_excerpt(resp)
+    if getattr(resp, "status_code", None) != 200:
+        return (
+            False,
+            f"{endpoint_label}: HTTP {getattr(resp, 'status_code', '?')}"
+            f"{', body=' + detail if detail else ''}",
+            {},
+        )
+    try:
+        data = resp.json()
+    except Exception:
+        return False, f"{endpoint_label}: non-JSON response {detail}", {}
+    if not isinstance(data, dict):
+        return False, f"{endpoint_label}: non-object JSON response", {}
+    if not str(data.get("access_token") or "").strip():
+        return False, f"{endpoint_label}: response missing access_token", data
+    return True, "ok", data
+
+
+def _token_refresh_attempts(session, refresh_token: str) -> list[tuple[str, str, dict[str, Any]]]:
+    browser_headers = {
+        "accept": "*/*",
+        "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "auth0-client": PLATFORM_AUTH0_CLIENT,
+        "cache-control": "no-cache",
+        "content-type": "application/json",
+        "origin": PLATFORM_BASE,
+        "pragma": "no-cache",
+        "referer": f"{PLATFORM_BASE}/",
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-site",
+        "user-agent": PLATFORM_USER_AGENT,
+    }
+    return [
+        (
+            "oauth_form",
+            f"{OPENAI_AUTH_BASE}/oauth/token",
+            {
+                "data": {
+                    "client_id": PLATFORM_OAUTH_CLIENT_ID,
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                },
+                "headers": {
+                    "Accept": "application/json",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "User-Agent": PLATFORM_USER_AGENT,
+                },
+                "timeout": 30,
+            },
+        ),
+        (
+            "accounts_api_json",
+            f"{OPENAI_AUTH_BASE}/api/accounts/oauth/token",
+            {
+                "json": {
+                    "client_id": PLATFORM_OAUTH_CLIENT_ID,
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                },
+                "headers": browser_headers,
+                "verify": True,
+                "timeout": 60,
+            },
+        ),
+    ]
 
 
 def _refresh_oauth_tokens_for_account(
@@ -605,38 +760,18 @@ def _refresh_oauth_tokens_for_account(
     refresh_token = str(account.get("refresh_token") or "").strip()
     if not refresh_token:
         return False, "missing refresh_token"
-    resp = session.post(
-        "https://auth.openai.com/oauth/token",
-        data={
-            "client_id": "app_2SKx67EdpoN0G6j64rFvigXD",
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-        },
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        timeout=30,
-    )
-    if resp.status_code != 200:
-        detail = _response_excerpt(resp)
-        return (
-            False,
-            f"token refresh failed: HTTP {resp.status_code}"
-            f"{', body=' + detail if detail else ''}",
-        )
-    try:
-        data = resp.json()
-    except Exception:
-        return False, f"token refresh returned non-JSON: {_response_excerpt(resp)}"
-    access_token = str(data.get("access_token") or "").strip()
-    if not access_token:
-        return False, "token refresh returned no access_token"
-    account["access_token"] = access_token
-    new_refresh = str(data.get("refresh_token") or "").strip()
-    if new_refresh:
-        account["refresh_token"] = new_refresh
-    id_token = str(data.get("id_token") or "").strip()
-    if id_token:
-        account["id_token"] = id_token
-    return True, "ok"
+    errors: list[str] = []
+    for label, url, kwargs in _token_refresh_attempts(session, refresh_token):
+        try:
+            resp = session.post(url, **kwargs)
+        except Exception as error:
+            errors.append(f"{label}: {error}")
+            continue
+        ok, detail, data = _parse_token_refresh_response(resp, label)
+        if ok and _apply_refreshed_token_payload(account, data):
+            return True, label
+        errors.append(detail)
+    return False, "token refresh failed: " + "; ".join(error for error in errors if error)
 
 
 def _recover_export_token(
@@ -674,24 +809,50 @@ def _recover_export_token(
     mail_cfg = _mail_config_with_proxy(config)
     if not configured_mailboxes(mail_cfg):
         return False, detail
+    proxy_cfg = config.get("proxy", {})
+    workspace_id = (
+        str(original.get("workspace_chatgpt_account_id") or "").strip()
+        or str(export.get("workspace_chatgpt_account_id") or "").strip()
+        or (
+            str(original.get("chatgpt_account_id") or "").strip()
+            if _is_workspace_plan(original.get("plan_type"))
+            else ""
+        )
+        or _primary_workspace_id(config)
+    )
     try:
-        proxy_cfg = config.get("proxy", {})
         tokens = re_login_email_otp_for_team_token(
             email=email,
             mail_config=mail_cfg,
             proxy=str(proxy_cfg.get("url", "")).strip(),
             flaresolverr_url=str(proxy_cfg.get("flaresolverr_url", "")).strip(),
-            workspace_id="",
+            workspace_id=workspace_id,
         )
     except Exception as error:
-        return False, f"{detail}; otp relogin failed: {error}"
+        if not _should_fallback_to_project_password(error):
+            return False, f"{detail}; otp relogin failed: {error}"
+        try:
+            tokens = _existing_login_with_project_password(
+                email=email,
+                mail_config=mail_cfg,
+                proxy=str(proxy_cfg.get("url", "")).strip(),
+                flaresolverr_url=str(proxy_cfg.get("flaresolverr_url") or "").strip(),
+                workspace_id=workspace_id,
+            )
+        except Exception as password_error:
+            return False, (
+                f"{detail}; otp relogin failed: {error}; "
+                f"project password relogin failed: {password_error}"
+            )
 
     for key in ("access_token", "refresh_token", "id_token"):
         if tokens.get(key):
             original[key] = tokens[key]
             export[key] = tokens[key]
+    if tokens.get("password"):
+        original["password"] = tokens["password"]
     original["source_type"] = original.get("source_type") or "existing_login"
-    return True, "otp_relogin"
+    return True, "relogin"
 
 
 def _filter_healthy_export_accounts(
@@ -826,13 +987,14 @@ def run_register(
     threads = _positive_int(reg_cfg.get("threads", 3), 3)
     proxy = str(proxy_cfg.get("url", "")).strip()
     flaresolverr_url = str(proxy_cfg.get("flaresolverr_url", "")).strip()
-    mail_cfg = _mail_config_with_proxy(config)
+    mail_cfg = _mail_config_for_job(config, cancel_event)
 
     logger.info(f"Starting registration: {total} accounts, {threads} threads")
     if proxy:
         logger.info(f"Proxy: {proxy}")
     if flaresolverr_url:
         logger.info(f"FlareSolverr: {flaresolverr_url}")
+    logger.info("Using project fixed password for new registrations")
 
     results: list[dict[str, Any]] = []
     existing = load_accounts(accounts_file)
@@ -897,7 +1059,7 @@ def run_login_existing(
     proxy_cfg = config.get("proxy", {})
     proxy = str(proxy_cfg.get("url", "")).strip()
     flaresolverr_url = str(proxy_cfg.get("flaresolverr_url", "")).strip()
-    mail_cfg = _mail_config_with_proxy(config)
+    mail_cfg = _mail_config_for_job(config, cancel_event)
     workspace_id = _primary_workspace_id(config)
     state_file = workspace_state_path(config)
     total = _positive_int(count, 10) if count is not None else _positive_int(
@@ -942,16 +1104,31 @@ def run_login_existing(
             logger.info(f"[{email}] Workspace already processed — skipping login")
             return None
         try:
-            tokens = re_login_email_otp_for_team_token(
-                email=email,
-                mail_config=mail_cfg,
-                proxy=proxy,
-                flaresolverr_url=flaresolverr_url,
-                workspace_id="",
-            )
+            try:
+                tokens = re_login_email_otp_for_team_token(
+                    email=email,
+                    mail_config=mail_cfg,
+                    proxy=proxy,
+                    flaresolverr_url=flaresolverr_url,
+                    workspace_id="",
+                )
+            except Exception as otp_error:
+                if not _should_fallback_to_project_password(otp_error):
+                    raise
+                logger.warning(
+                    f"[{email}] OTP login unavailable: {otp_error}; "
+                    "trying project fixed password"
+                )
+                tokens = _existing_login_with_project_password(
+                    email=email,
+                    mail_config=mail_cfg,
+                    proxy=proxy,
+                    flaresolverr_url=flaresolverr_url,
+                    workspace_id="",
+                )
             account = {
                 "email": email,
-                "password": "",
+                "password": str(tokens.get("password") or "").strip(),
                 "access_token": tokens["access_token"],
                 "refresh_token": tokens["refresh_token"],
                 "id_token": tokens["id_token"],
@@ -977,17 +1154,6 @@ def run_login_existing(
                 )
             logger.info(f"[{email}] ✓ Existing account logged in")
             return account
-        except PasswordRequiredError as error:
-            if workspace_id:
-                set_workspace_email_state(
-                    state_file,
-                    workspace_id,
-                    email,
-                    "otp_login_unavailable",
-                    mode="login_existing",
-                    reason=str(error),
-                )
-            logger.warning(f"[{email}] ✗ OTP login unavailable: {error}")
         except Exception as error:
             if workspace_id:
                 set_workspace_email_state(
@@ -1205,7 +1371,7 @@ def run_re_login(
     proxy_cfg = config.get("proxy", {})
     proxy = str(proxy_cfg.get("url", "")).strip()
     flaresolverr_url = str(proxy_cfg.get("flaresolverr_url", "")).strip()
-    mail_cfg = _mail_config_with_proxy(config)
+    mail_cfg = _mail_config_for_job(config, cancel_event)
     workspace_ids = _string_list(ws_cfg.get("ids", []))
     threads = _bounded_workers(
         _parallel_threads(config, "login_threads", 1),
@@ -1362,41 +1528,15 @@ def run_refresh_tokens(
         try:
             session = _create_http_session(proxy)
 
-            # Step 1: Refresh the access token
-            resp = session.post(
-                "https://auth.openai.com/oauth/token",
-                data={
-                    "client_id": "app_2SKx67EdpoN0G6j64rFvigXD",
-                    "grant_type": "refresh_token",
-                    "refresh_token": rt,
-                },
-                headers={
-                    "Content-Type": "application/x-www-form-urlencoded",
-                },
-                timeout=30,
+            # Step 1: Refresh the access token. The browser API endpoint is a
+            # fallback for auth.openai.com cases that return the login SPA HTML.
+            refresh_ok, refresh_detail = _refresh_oauth_tokens_for_account(
+                session,
+                account,
             )
-            if resp.status_code == 200:
-                try:
-                    data = resp.json()
-                except Exception as error:
-                    detail = _response_excerpt(resp)
-                    raise RuntimeError(
-                        f"token refresh returned non-JSON: HTTP {resp.status_code}, "
-                        f"body={detail}"
-                    ) from error
-                new_at = data.get("access_token", "")
-                new_rt = data.get("refresh_token", "")
-                if new_at:
-                    account["access_token"] = new_at
-                if new_rt:
-                    account["refresh_token"] = new_rt
-                logger.info(f"[{email}] Token refreshed")
-            else:
-                detail = _response_excerpt(resp)
-                raise RuntimeError(
-                    f"token refresh failed: HTTP {resp.status_code}"
-                    f"{', body=' + detail if detail else ''}"
-                )
+            if not refresh_ok:
+                raise RuntimeError(refresh_detail)
+            logger.info(f"[{email}] Token refreshed via {refresh_detail}")
 
             # Step 2: Call check API to get real plan_type and account_id
             at = account.get("access_token", "")

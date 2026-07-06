@@ -17,16 +17,25 @@ from chatgpt_register_k12.pipeline import (
     _fetch_account_context,
     run_export,
     run_full_pipeline,
+    run_register,
     run_refresh_tokens,
 )
+from chatgpt_register_k12.register.registrar import (
+    PROJECT_REGISTRATION_PASSWORD,
+    PlatformRegistrar,
+    normalize_registration_password,
+)
 from chatgpt_register_k12.register.mail_provider import (
+    GmailPasswordProvider,
     OutlookTokenProvider,
     _entry_has_address,
     _fill_mailbox_credentials,
     _make_config,
     _message_matches_mailbox,
     _plus_alias_address,
+    configured_mailboxes,
     mark_mailbox_result,
+    parse_gmail_password_credentials,
 )
 from chatgpt_register_k12.workspace.joiner import join_workspace
 
@@ -125,6 +134,68 @@ class FakeJoinSession:
 
 
 class OfflineFlowTests(unittest.TestCase):
+    def test_project_registration_password_is_fixed_and_valid(self):
+        self.assertEqual(PROJECT_REGISTRATION_PASSWORD, "#A1234567890")
+        self.assertEqual(
+            normalize_registration_password(PROJECT_REGISTRATION_PASSWORD),
+            PROJECT_REGISTRATION_PASSWORD,
+        )
+        registrar = PlatformRegistrar(mail_config={})
+        try:
+            self.assertEqual(registrar.account_password, PROJECT_REGISTRATION_PASSWORD)
+        finally:
+            registrar.close()
+
+    def test_registration_password_requires_twelve_characters(self):
+        self.assertEqual(
+            normalize_registration_password("FixedPassword123!"),
+            "FixedPassword123!",
+        )
+        with self.assertRaisesRegex(ValueError, "cannot be empty"):
+            normalize_registration_password("")
+        with self.assertRaisesRegex(ValueError, "at least 12"):
+            normalize_registration_password("short")
+
+    def test_run_register_does_not_accept_user_configured_password(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            accounts_file = Path(tmp) / "registered_accounts.json"
+            config = {
+                "_config_dir": tmp,
+                "registration": {
+                    "total": 1,
+                    "threads": 1,
+                    "password": "UserConfigured123!",
+                },
+                "proxy": {"url": ""},
+                "mail": {},
+            }
+            seen_kwargs = []
+
+            def fake_register_worker(**kwargs):
+                seen_kwargs.append(kwargs)
+                return {
+                    "ok": True,
+                    "index": kwargs["index"],
+                    "cost_seconds": 0.1,
+                    "result": {
+                        "email": "user@example.com",
+                        "password": PROJECT_REGISTRATION_PASSWORD,
+                        "access_token": "access-token",
+                        "refresh_token": "refresh-token",
+                        "id_token": "id-token",
+                    },
+                }
+
+            with patch(
+                "chatgpt_register_k12.pipeline.register_worker",
+                side_effect=fake_register_worker,
+            ):
+                accounts = run_register(config, accounts_file)
+
+            self.assertEqual(len(seen_kwargs), 1)
+            self.assertNotIn("account_password", seen_kwargs[0])
+            self.assertEqual(accounts[0]["password"], PROJECT_REGISTRATION_PASSWORD)
+
     def test_run_archive_paths_use_timestamped_count_folder(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = {
@@ -688,6 +759,105 @@ class OfflineFlowTests(unittest.TestCase):
             finally:
                 provider.close()
 
+    def test_outlook_failed_alias_can_be_retried(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            entry = {
+                "type": "outlook_token",
+                "enable": True,
+                "alias_enabled": True,
+                "alias_limit_per_mailbox": 2,
+                "mailboxes": (
+                    "retryuser@example.com----pw----client-id----refresh-token"
+                ),
+            }
+            provider = OutlookTokenProvider(
+                entry,
+                _make_config(
+                    {
+                        "_config_dir": tmp,
+                        "request_timeout": 1,
+                        "wait_timeout": 1,
+                        "wait_interval": 1,
+                    }
+                ),
+            )
+            try:
+                first = provider.create_mailbox()
+                mark_mailbox_result(first, success=False, error="temporary failure")
+                second = provider.create_mailbox()
+
+                self.assertEqual(second["address"], first["address"])
+            finally:
+                provider.close()
+
+    def test_gmail_app_password_parser_removes_spaces(self):
+        credentials = parse_gmail_password_credentials(
+            "user@gmail.com----abcd efgh ijkl mnop\n"
+        )
+
+        self.assertEqual(credentials[0]["email"], "user@gmail.com")
+        self.assertEqual(credentials[0]["app_password"], "abcdefghijklmnop")
+
+    def test_gmail_password_candidates_use_aliases(self):
+        candidates = configured_mailboxes(
+            {
+                "providers": [
+                    {
+                        "type": "gmail_password",
+                        "enable": True,
+                        "alias_enabled": True,
+                        "alias_limit_per_mailbox": 3,
+                        "mailboxes": "user@gmail.com----abcd efgh ijkl mnop",
+                    }
+                ],
+                "alias_enabled": True,
+                "alias_limit_per_mailbox": 3,
+            }
+        )
+
+        self.assertEqual(
+            [item["address"] for item in candidates],
+            [
+                "user@gmail.com",
+                "user+1@gmail.com",
+                "user+2@gmail.com",
+            ],
+        )
+        self.assertEqual(candidates[0]["provider"], "gmail_password")
+        self.assertEqual(candidates[0]["login_address"], "user@gmail.com")
+
+    def test_gmail_password_pool_uses_main_plus_aliases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            entry = {
+                "type": "gmail_password",
+                "enable": True,
+                "alias_enabled": True,
+                "alias_limit_per_mailbox": 2,
+                "mailboxes": "user@gmail.com----abcd efgh ijkl mnop",
+            }
+            provider = GmailPasswordProvider(
+                entry,
+                _make_config(
+                    {
+                        "_config_dir": tmp,
+                        "request_timeout": 1,
+                        "wait_timeout": 1,
+                        "wait_interval": 1,
+                    }
+                ),
+            )
+            try:
+                first = provider.create_mailbox()
+                mark_mailbox_result(first, success=True)
+                second = provider.create_mailbox()
+
+                self.assertEqual(first["address"], "user@gmail.com")
+                self.assertEqual(second["address"], "user+1@gmail.com")
+                self.assertEqual(second["login_address"], "user@gmail.com")
+                self.assertEqual(second["app_password"], "abcdefghijklmnop")
+            finally:
+                provider.close()
+
     def test_outlook_alias_matches_base_credential(self):
         entry = {
             "type": "outlook_token",
@@ -704,6 +874,25 @@ class OfflineFlowTests(unittest.TestCase):
         self.assertEqual(mailbox["refresh_token"], "refresh-token")
         self.assertEqual(mailbox["base_address"], "aliasuser@example.com")
         self.assertEqual(mailbox["login_address"], "aliasuser@example.com")
+
+    def test_gmail_password_alias_fills_app_password_only(self):
+        entry = {
+            "type": "gmail_password",
+            "mailboxes": "aliasuser@gmail.com----abcd efgh ijkl mnop",
+        }
+        mailbox = {
+            "provider": "gmail_password",
+            "address": "aliasuser+2@gmail.com",
+        }
+
+        self.assertTrue(_entry_has_address(entry, mailbox["address"]))
+        _fill_mailbox_credentials(mailbox, entry)
+
+        self.assertEqual(mailbox["app_password"], "abcdefghijklmnop")
+        self.assertEqual(mailbox["base_address"], "aliasuser@gmail.com")
+        self.assertEqual(mailbox["login_address"], "aliasuser@gmail.com")
+        self.assertNotIn("client_id", mailbox)
+        self.assertNotIn("refresh_token", mailbox)
 
     def test_alias_message_matching_uses_recipient(self):
         mailbox = {"address": "aliasuser+2@example.com"}

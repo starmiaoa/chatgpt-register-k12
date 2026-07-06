@@ -29,6 +29,7 @@ body {
 
 h1,
 h2,
+h3,
 p {
   margin: 0;
 }
@@ -41,6 +42,11 @@ h1 {
 h2 {
   font-size: 16px;
   margin-bottom: 12px;
+}
+
+h3 {
+  font-size: 14px;
+  margin-bottom: 6px;
 }
 
 p {
@@ -99,6 +105,43 @@ label {
 .check input {
   width: auto;
   margin: 0;
+}
+
+.provider-switch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  border: 0;
+  padding: 0;
+  margin: 0 0 12px;
+}
+
+.provider-switch legend {
+  grid-column: 1 / -1;
+  font-size: 13px;
+  font-weight: 700;
+  margin-bottom: 2px;
+}
+
+.provider-switch label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  margin: 0;
+  padding: 9px 10px;
+  border: 1px solid #bcccdc;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.provider-switch input {
+  width: auto;
+  margin: 0;
+}
+
+.provider-panel {
+  margin-bottom: 12px;
 }
 
 input,
@@ -277,6 +320,10 @@ pre {
   .job-controls {
     grid-template-columns: 1fr;
   }
+
+  .provider-switch {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (prefers-color-scheme: dark) {
@@ -292,6 +339,10 @@ pre {
 
   .mode-option {
     border-color: #304255;
+  }
+
+  .provider-switch label {
+    border-color: #42566c;
   }
 
   .mode-option small,

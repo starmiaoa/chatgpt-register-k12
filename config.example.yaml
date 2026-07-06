@@ -20,6 +20,15 @@ mail:
       message_limit: 10
       mailboxes: |
         user1@example.com----google_client_id----google_client_secret----google_refresh_token
+    - type: gmail_password
+      enable: false
+      label: Gmail App Password Pool
+      imap_host: imap.gmail.com
+      message_limit: 10
+      alias_enabled: true
+      alias_limit_per_mailbox: 5
+      mailboxes: |
+        user1@example.com----gmail_app_password
   request_timeout: 30
   wait_timeout: 45
   wait_interval: 3
@@ -55,7 +64,7 @@ workspace_state:
 
 existing_login:
   mode: "email_otp"
-  fallback_to_password: false
+  fallback_to_password: true
 
 export:
   # sub2api, auth, raw-session, cpa, cockpit, 9router, axonhub
@@ -70,7 +79,7 @@ sub2api:
   require_team_tokens: auto
   # Export only accounts that still pass a live ChatGPT backend token check.
   health_check: true
-  health_check_endpoint: models
+  health_check_endpoint: check
   health_check_timeout: 30
   health_check_retries: 2
   health_check_backoff_ms: 3000

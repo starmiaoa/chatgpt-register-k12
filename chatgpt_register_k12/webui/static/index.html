@@ -38,8 +38,31 @@
             <label>线程 <input name="threads" type="number" min="1" value="2"></label>
             <label>别名上限 <input name="alias_limit_per_mailbox" type="number" min="1" value="5"></label>
           </div>
-          <label class="switch"><span>启用 Outlook 别名</span><input name="alias_enabled" type="checkbox" checked></label>
-          <label>Outlook 邮箱池（格式：邮箱----邮箱密码----client_id----refresh_token，一行一个） <textarea name="outlook_mailboxes" rows="8" spellcheck="false" placeholder="user@example.com----password----client_id----refresh_token"></textarea></label>
+          <label class="switch"><span>启用邮箱别名</span><input name="alias_enabled" type="checkbox" checked></label>
+
+          <fieldset class="provider-switch">
+            <legend>邮箱类型</legend>
+            <label>
+              <input name="mail_provider" type="radio" value="outlook" checked>
+              <span>Outlook Token</span>
+            </label>
+            <label>
+              <input name="mail_provider" type="radio" value="gmail">
+              <span>Gmail App Password</span>
+            </label>
+          </fieldset>
+
+          <section class="provider-panel" data-provider-panel="outlook">
+            <h3>Outlook 邮箱池</h3>
+            <p class="hint">格式：邮箱----邮箱密码----client_id----refresh_token，一行一个。</p>
+            <textarea name="outlook_mailboxes" rows="8" spellcheck="false" placeholder="user@example.com----password----client_id----refresh_token"></textarea>
+          </section>
+
+          <section class="provider-panel" data-provider-panel="gmail" hidden>
+            <h3>Gmail 邮箱池</h3>
+            <p class="hint">格式：Gmail邮箱----16位App Password，一行一个。App Password 中的空格可以保留或去掉。</p>
+            <textarea name="gmail_mailboxes" rows="8" spellcheck="false" placeholder="user@gmail.com----abcd efgh ijkl mnop"></textarea>
+          </section>
           <div class="actions">
             <button type="button" data-action="save-config">保存配置</button>
             <button type="button" data-action="preview">预览候选</button>
@@ -91,6 +114,6 @@
         <pre id="terminalOutput" class="terminal"></pre>
       </section>
     </main>
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=20260706-project-password"></script>
   </body>
 </html>
