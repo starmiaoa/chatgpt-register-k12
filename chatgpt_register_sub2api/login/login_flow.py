@@ -63,6 +63,10 @@ class LoginError(RuntimeError):
     """Login flow failed."""
 
 
+class PasswordRequiredError(LoginError):
+    """The auth session requires password login; OTP-only login is unavailable."""
+
+
 def _response_json(resp) -> dict:
     try:
         data = resp.json()
@@ -408,6 +412,55 @@ def _complete_about_you(
 # ── Re-login with workspace selection ───────────────────────────────
 
 
+def _start_login_authorize(
+    session,
+    device_id: str,
+    email: str,
+) -> tuple[dict[str, Any], str]:
+    logger.info(f"[{email}] Team login: authorizing")
+    code_verifier, code_challenge = generate_pkce()
+
+    session.cookies.set("oai-did", device_id, domain=".auth.openai.com")
+    session.cookies.set("oai-did", device_id, domain="auth.openai.com")
+
+    params = {
+        "issuer": AUTH_BASE,
+        "client_id": PLATFORM_OAUTH_CLIENT_ID,
+        "audience": PLATFORM_OAUTH_AUDIENCE,
+        "redirect_uri": PLATFORM_OAUTH_REDIRECT_URI,
+        "device_id": device_id,
+        "screen_hint": "login",
+        "max_age": "0",
+        "login_hint": email,
+        "scope": "openid profile email offline_access",
+        "response_type": "code",
+        "response_mode": "query",
+        "state": secrets.token_urlsafe(32),
+        "nonce": secrets.token_urlsafe(32),
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
+        "auth0Client": PLATFORM_AUTH0_CLIENT,
+    }
+    auth_url = f"{AUTH_BASE}/api/accounts/authorize?{urlencode(params)}"
+    headers = navigate_headers(f"{PLATFORM_BASE}/")
+
+    resp, error = request_with_retry(
+        session,
+        "get",
+        auth_url,
+        headers=headers,
+        allow_redirects=True,
+        verify=True,
+    )
+    if resp is None or resp.status_code != 200:
+        raise LoginError(
+            f"Login authorize failed: HTTP "
+            f"{getattr(resp, 'status_code', '?')}, {error or ''}"
+        )
+    logger.info(f"[{email}] Team login: authorize HTTP {resp.status_code}")
+    return _data_with_response_hints(resp), code_verifier
+
+
 def re_login_for_team_token(
     email: str,
     password: str,
@@ -442,43 +495,7 @@ def re_login_for_team_token(
 
     try:
         # Step 1: Authorize as login
-        logger.info(f"[{email}] Team login: authorizing")
-        code_verifier, code_challenge = generate_pkce()
-
-        session.cookies.set("oai-did", device_id, domain=".auth.openai.com")
-        session.cookies.set("oai-did", device_id, domain="auth.openai.com")
-
-        params = {
-            "issuer": AUTH_BASE,
-            "client_id": PLATFORM_OAUTH_CLIENT_ID,
-            "audience": PLATFORM_OAUTH_AUDIENCE,
-            "redirect_uri": PLATFORM_OAUTH_REDIRECT_URI,
-            "device_id": device_id,
-            "screen_hint": "login",
-            "max_age": "0",
-            "login_hint": email,
-            "scope": "openid profile email offline_access",
-            "response_type": "code",
-            "response_mode": "query",
-            "state": secrets.token_urlsafe(32),
-            "nonce": secrets.token_urlsafe(32),
-            "code_challenge": code_challenge,
-            "code_challenge_method": "S256",
-            "auth0Client": PLATFORM_AUTH0_CLIENT,
-        }
-        auth_url = f"{AUTH_BASE}/api/accounts/authorize?{urlencode(params)}"
-        headers = navigate_headers(f"{PLATFORM_BASE}/")
-
-        resp, error = request_with_retry(
-            session, "get", auth_url, headers=headers,
-            allow_redirects=True, verify=True,
-        )
-        if resp is None or resp.status_code != 200:
-            raise LoginError(
-                f"Login authorize failed: HTTP "
-                f"{getattr(resp, 'status_code', '?')}, {error or ''}"
-            )
-        logger.info(f"[{email}] Team login: authorize HTTP {resp.status_code}")
+        _, code_verifier = _start_login_authorize(session, device_id, email)
 
         # Step 2: Verify password against the current auth session.
         logger.info(f"[{email}] Team login: verifying password")
@@ -524,6 +541,69 @@ def re_login_for_team_token(
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
 
+    finally:
+        session.close()
+
+
+def re_login_email_otp_for_team_token(
+    email: str,
+    mail_config: dict,
+    proxy: str = "",
+    flaresolverr_url: str = "",
+    workspace_id: str = "",
+) -> dict:
+    """Re-login using only email OTP when the auth session allows it."""
+    session = create_register_session(
+        proxy=proxy, flaresolverr_url=flaresolverr_url
+    )
+    device_id = str(uuid.uuid4())
+
+    try:
+        data, code_verifier = _start_login_authorize(session, device_id, email)
+        page_type = _page_type_from_data(data)
+        code = _extract_code_from_data(data)
+        if not code:
+            if page_type in {"login_password", "password", ""}:
+                logger.info(f"[{email}] Team login: trying email OTP login")
+                try:
+                    _send_login_otp(session)
+                    data = {"page": {"type": "email_otp_verification"}}
+                except Exception as error:
+                    raise PasswordRequiredError(
+                        "OTP-only login is unavailable; password is required"
+                    ) from error
+            elif page_type == "email_otp_send":
+                _send_login_otp(session)
+                data = {"page": {"type": "email_otp_verification"}}
+
+            code, code_verifier = _complete_login_flow(
+                session=session,
+                device_id=device_id,
+                email=email,
+                mail_config=mail_config,
+                workspace_id=workspace_id,
+                response_data=data,
+                code_verifier=code_verifier,
+                password=None,
+            )
+
+        logger.info(f"[{email}] Team login: exchanging code for tokens")
+        tokens = _exchange_login_tokens(
+            session,
+            code_verifier=code_verifier,
+            code=code,
+        )
+        logger.info(f"[{email}] Team login: token exchange succeeded")
+
+        return {
+            "email": email,
+            "password": "",
+            "access_token": str(tokens.get("access_token") or "").strip(),
+            "refresh_token": str(tokens.get("refresh_token") or "").strip(),
+            "id_token": str(tokens.get("id_token") or "").strip(),
+            "scope": "team" if workspace_id else "personal",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
     finally:
         session.close()
 
@@ -750,7 +830,7 @@ def _complete_login_flow(
     workspace_id: str,
     response_data: dict[str, Any],
     code_verifier: str,
-    password: str,
+    password: str | None,
 ) -> tuple[str, str]:
     """Drive the auth session until it returns a platform callback code."""
     data = response_data
@@ -771,6 +851,10 @@ def _complete_login_flow(
             break
 
         if page_type in {"login_password", "password"}:
+            if not password:
+                raise PasswordRequiredError(
+                    "OTP-only login reached password page"
+                )
             logger.info(f"[{email}] Team login: continuing password page")
             data = _handle_password_verification(
                 session=session,

@@ -1,8 +1,8 @@
 # chatgpt-register-sub2api
 
-`chatgpt-register-sub2api` 是一个用于自动化注册流程、刷新账号工作空间上下文，并导出 Sub2API 兼容 JSON 的命令行工具。
+`chatgpt-register-sub2api` 是一个本地 WebUI 工具，用于管理邮箱池、注册或登录 ChatGPT 账号、刷新账号工作空间上下文，并导出多种兼容 JSON。默认导出 Sub2API，也可以切换为 auth.json、CPA、Cockpit、9router、AxonHub 等格式。
 
-项目支持 Outlook/Gmail OAuth 邮箱池、Outlook plus alias、workspace/K12 上下文检查、并发执行和结果归档。仓库中的配置均为脱敏示例，不包含真实邮箱、密码、token、workspace ID 或运行结果。
+项目支持 Outlook/Gmail OAuth 邮箱池、Outlook plus alias、workspace/K12 上下文检查、已有账号邮箱验证码登录、并发执行和结果归档。仓库中的配置均为脱敏示例，不包含真实邮箱、密码、token、workspace ID 或运行结果。
 
 > 请仅在你有权使用的邮箱、账号和工作空间中运行本工具，并自行确认相关服务条款和合规要求。
 
@@ -12,15 +12,18 @@
 - 支持 Gmail OAuth/IMAP 邮箱池接收验证码
 - 支持 Outlook `+数字` 别名扩展
 - 支持注册、workspace 加入/申请、refresh/check、导出完整流水线
+- 支持本地 WebUI 两种主流程
+- 支持已有账号邮箱验证码登录并重新获取 token
 - 支持 K12/workspace 上下文识别，避免把未确认的 personal/free 上下文误导出
+- 支持按 `workspace_id + email` 防重复，同一邮箱可复用到不同 workspace
 - 支持注册、加入、刷新等阶段并发配置
 - 支持按运行时间和账号数量归档输出文件
-- 支持 Sub2API 格式 JSON 导出
+- 支持多种 JSON 导出格式，默认 Sub2API
 
 ## 工作流程
 
 ```text
-邮箱池 -> 注册账号 -> 加入/申请 workspace -> refresh/check 账号上下文 -> 导出 Sub2API JSON
+邮箱池 -> 注册新账号或验证码登录已有账号 -> 加入/申请 workspace -> refresh/check 账号上下文 -> 健康检查 -> 导出 JSON
 ```
 
 完整运行后，默认会在 `runs/` 下生成独立目录：
@@ -33,13 +36,14 @@ runs/
     test_run.log
 ```
 
-跨运行共享的邮箱状态文件保存在：
+跨运行共享的状态文件保存在：
 
 ```text
 data/outlook_token_state.json
+data/workspace_account_state.json
 ```
 
-它用于记录 Outlook 主邮箱和别名的 `used`、`failed`、`in_use` 状态，防止后续注册重复使用同一个邮箱地址。
+`outlook_token_state.json` 记录邮箱凭据是否失效和临时占用。`workspace_account_state.json` 按 `workspace_id + email` 记录是否已处理、检查或导出。同一邮箱已经导出到 workspace A，不会影响它继续导出到 workspace B。
 
 ## 安装
 
@@ -66,7 +70,7 @@ python -m pip install -e .
 - `curl-cffi`
 - `pyyaml`
 
-## 快速开始
+## 快速开始：本地 WebUI
 
 生成本地配置文件：
 
@@ -74,13 +78,45 @@ python -m pip install -e .
 chatgpt-register init
 ```
 
-编辑生成的 `config.yaml`，至少需要配置：
+启动 WebUI：
+
+```bash
+chatgpt-register web -c config.yaml --host 127.0.0.1 --port 8787
+```
+
+打开：
+
+```text
+http://127.0.0.1:8787/
+```
+
+在页面里填写或保存：
 
 - 邮箱池
 - 代理
 - workspace ID
+- 导出格式
+- 数量和线程
+- Outlook 别名设置
 
-执行完整流水线：
+页面提供两个主按钮：
+
+```text
+无账号注册
+有账号登录获得新的 token
+```
+
+`无账号注册` 会执行注册、join、refresh/check 和导出。`有账号登录获得新的 token` 会用邮箱验证码登录已有账号，重新获取 token 后执行 join、refresh/check 和导出。导出格式默认是 Sub2API，可在页面的“导出格式”下拉框切换。
+
+输出文件会进入：
+
+```text
+runs/YYYYMMDD-HHMMSS_<count>_accounts/
+```
+
+## 命令行用法
+
+旧 CLI 仍然可用。执行完整流水线：
 
 ```bash
 chatgpt-register run -c config.yaml -n 6 -t 3 --workspace-id <workspace-uuid> -v
@@ -98,11 +134,11 @@ chatgpt-register run -c config.yaml -n 6 -t 3 --workspace-id <workspace-uuid> -v
 Outlook 支持 plus alias。开启别名后，一个主邮箱可以依次用于：
 
 ```text
-user@outlook.com
-user+1@outlook.com
-user+2@outlook.com
-user+3@outlook.com
-user+4@outlook.com
+user@example.com
+user+1@example.com
+user+2@example.com
+user+3@example.com
+user+4@example.com
 ```
 
 配置示例：
@@ -116,7 +152,7 @@ mail:
       alias_enabled: true
       alias_limit_per_mailbox: 5
       mailboxes: |
-        user@outlook.com----mail_password----client_id----refresh_token
+        user@example.com----mail_password----client_id----refresh_token
 
 proxy:
   url: "socks5://127.0.0.1:10808"
@@ -139,6 +175,35 @@ chatgpt-register run -c config.yaml -n 5 -t 3 --workspace-id <workspace-uuid> -v
 
 ```text
 runs/YYYYMMDD-HHMMSS_5_accounts/sub2api_bundle.json
+```
+
+## 导出格式
+
+默认格式是 `sub2api`。支持的格式：
+
+- `sub2api`：Sub2API bundle，默认文件名 `sub2api_bundle.json`
+- `auth`：Codex/ChatGPT auth.json 风格，默认文件名 `auth.json`
+- `raw-session`：Session JSON 风格，默认文件名 `session.json`
+- `cpa`：CPA 风格账号数组，默认文件名 `cpa.json`
+- `cockpit`：Cockpit 风格账号数组，默认文件名 `cockpit.json`
+- `9router`：9router 风格账号数组，默认文件名 `9router.json`
+- `axonhub`：AxonHub 风格账号数组，默认文件名 `axonhub-auth.json`
+
+配置文件里可以这样固定导出格式：
+
+```yaml
+export:
+  format: sub2api
+  output_file: ""
+```
+
+`output_file` 留空时会按格式自动选择默认文件名。为了兼容旧配置，`sub2api.output_file` 仍然对 Sub2API 格式有效。
+
+CLI 临时切换格式：
+
+```bash
+chatgpt-register run -c config.yaml -n 5 -t 3 --workspace-id <workspace-uuid> --format cpa -v
+chatgpt-register export -c config.yaml -i registered_accounts.json --format 9router -v
 ```
 
 ## 配置说明
@@ -206,7 +271,7 @@ sub2api:
   health_check_delay_seconds: 5
 ```
 
-`health_check` 开启后，导出前会用 ChatGPT backend 做一次轻量检查。已经被服务端吊销、返回 `token_invalidated`、或检查接口异常的账号不会写入 `sub2api_bundle.json`。因此导出数量可能少于注册成功数量，这是为了避免导入 Sub2API 后立刻 401。
+`health_check` 开启后，导出前会用 ChatGPT backend 做一次轻量检查。已经被服务端吊销、返回 `token_invalidated`、或检查接口异常的账号不会写入最终导出 JSON。因此导出数量可能少于注册成功数量，这是为了避免导入后立刻 401。
 
 ### 输出归档
 
@@ -222,21 +287,24 @@ output:
 
 | 命令 | 说明 |
 | --- | --- |
+| `web` | 启动本地 WebUI |
 | `init` | 生成默认 `config.yaml` |
 | `register` | 只执行注册 |
 | `join-workspace` | 对已有账号执行 workspace 加入/申请 |
 | `refresh` | 刷新 token 并检查账号/workspace 上下文 |
 | `login-team` | 实验性 team/workspace 重新登录流程 |
-| `export` | 将已有账号记录导出为 Sub2API JSON |
+| `export` | 将已有账号记录导出为指定格式 JSON |
 | `run` | 完整流水线：register -> join -> refresh/check -> export |
 
 示例：
 
 ```bash
+chatgpt-register web -c config.yaml --host 127.0.0.1 --port 8787
 chatgpt-register register -c config.yaml -n 5 -t 3 -v
 chatgpt-register join-workspace -c config.yaml -i registered_accounts.json --workspace-id <workspace-uuid> -t 5 -v
 chatgpt-register refresh -c config.yaml -i registered_accounts.json --workspace-id <workspace-uuid> -t 5 -v
 chatgpt-register export -c config.yaml -i registered_accounts.json -o sub2api_bundle.json -v
+chatgpt-register export -c config.yaml -i registered_accounts.json --format cpa -v
 ```
 
 ## 复用已有账号到其他 Workspace
@@ -256,7 +324,7 @@ chatgpt-register export -c config.yaml -i registered_accounts.json -o sub2api_bu
 常见输出：
 
 - `registered_accounts.json`：注册成功的账号记录
-- `sub2api_bundle.json`：Sub2API 兼容 bundle
+- `sub2api_bundle.json` / `cpa.json` / `9router.json` 等：最终导出 JSON
 - `test_run.log`：运行日志
 - `data/outlook_token_state.json`：邮箱/别名状态
 

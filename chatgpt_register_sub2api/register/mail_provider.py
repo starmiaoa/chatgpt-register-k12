@@ -22,6 +22,11 @@ from typing import Any, Callable
 
 from curl_cffi import requests
 
+from chatgpt_register_sub2api.workspace_state import (
+    claim_workspace_email,
+    set_workspace_email_state,
+    workspace_email_available,
+)
 from chatgpt_register_sub2api.utils.proxy import normalize_proxy_url
 
 # ── Data directory (stores pool state) ─────────────────────────────
@@ -222,6 +227,23 @@ def _entry_available(entry: dict[str, Any] | None) -> bool:
     return True
 
 
+def _entry_available_for_workspace(
+    entry: dict[str, Any] | None,
+    *,
+    workspace_scoped: bool,
+) -> bool:
+    if not workspace_scoped:
+        return _entry_available(entry)
+    if not isinstance(entry, dict):
+        return True
+    current = str(entry.get("state") or "")
+    if current == "token_invalid":
+        return False
+    if current == "in_use":
+        return _entry_available(entry)
+    return True
+
+
 def _set_state(
     address: str,
     state: str,
@@ -332,6 +354,66 @@ def parse_gmail_credentials(text: str) -> list[dict[str, str]]:
             }
         )
     return credentials
+
+
+def configured_mailboxes(mail_config: dict) -> list[dict[str, Any]]:
+    """Return configured mailbox candidates without mutating provider state."""
+    candidates: list[dict[str, Any]] = []
+    conf = _make_config(mail_config)
+    provider_entries = _provider_entries(mail_config)
+    for entry in provider_entries:
+        provider_type = str(entry.get("type") or "").strip()
+        provider_ref = str(entry.get("provider_ref") or "").strip()
+        label = str(entry.get("label") or provider_ref or provider_type)
+        if provider_type == OutlookTokenProvider.name:
+            pool = parse_outlook_credentials(
+                str(entry.get("mailboxes") or entry.get("pool") or "")
+            )
+            alias_enabled = _bool_value(
+                entry.get("alias_enabled"),
+                _bool_value(conf.get("alias_enabled"), False),
+            )
+            alias_limit = _positive_int(
+                entry.get("alias_limit_per_mailbox")
+                or conf.get("alias_limit_per_mailbox")
+                or 6,
+                6,
+            )
+            for credential in pool:
+                base_address = _base_plus_address(credential["email"])
+                aliases = _plus_aliases(base_address, alias_limit if alias_enabled else 1)
+                for alias_index, alias_address in aliases:
+                    candidates.append(
+                        {
+                            "provider": provider_type,
+                            "provider_ref": provider_ref,
+                            "label": label,
+                            "address": alias_address,
+                            "base_address": base_address,
+                            "login_address": base_address,
+                            "alias_index": alias_index,
+                            "alias_limit_per_mailbox": alias_limit,
+                            "password": credential["password"],
+                            "client_id": credential["client_id"],
+                            "refresh_token": credential["refresh_token"],
+                        }
+                    )
+        elif provider_type == GmailOAuthProvider.name:
+            for credential in parse_gmail_credentials(
+                str(entry.get("mailboxes") or entry.get("pool") or "")
+            ):
+                candidates.append(
+                    {
+                        "provider": provider_type,
+                        "provider_ref": provider_ref,
+                        "label": label,
+                        "address": credential["email"],
+                        "client_id": credential["client_id"],
+                        "client_secret": credential["client_secret"],
+                        "refresh_token": credential["refresh_token"],
+                    }
+                )
+    return candidates
 
 
 # ── Code extraction ─────────────────────────────────────────────────
@@ -681,6 +763,10 @@ class OutlookTokenProvider(BaseMailProvider):
             6,
         )
         self.state_file = Path(conf.get("state_file") or STATE_FILE)
+        self.workspace_id = str(conf.get("workspace_id") or "").strip()
+        self.workspace_state_file = Path(
+            conf.get("workspace_state_file") or DATA_DIR / "workspace_account_state.json"
+        )
         self.session = self._make_session()
 
     def _make_session(self):
@@ -768,11 +854,31 @@ class OutlookTokenProvider(BaseMailProvider):
                     self.alias_limit_per_mailbox if self.alias_enabled else 1,
                 )
                 for alias_index, alias_address in aliases:
-                    if _entry_available(
-                        _state_entry(store, alias_address, self.name)
+                    if not _entry_available_for_workspace(
+                        _state_entry(store, alias_address, self.name),
+                        workspace_scoped=bool(self.workspace_id),
                     ):
-                        selected = (item, alias_index, alias_address)
-                        break
+                        continue
+                    if self.workspace_id and not workspace_email_available(
+                        self.workspace_state_file,
+                        self.workspace_id,
+                        alias_address,
+                    ):
+                        continue
+                    if self.workspace_id and not claim_workspace_email(
+                        self.workspace_state_file,
+                        self.workspace_id,
+                        alias_address,
+                        mode="register",
+                        extra={
+                            "provider": self.name,
+                            "base_address": base_address,
+                            "alias_index": alias_index,
+                        },
+                    ):
+                        continue
+                    selected = (item, alias_index, alias_address)
+                    break
                 if selected is not None:
                     break
             if selected is None:
@@ -806,6 +912,8 @@ class OutlookTokenProvider(BaseMailProvider):
             "client_id": credential["client_id"],
             "refresh_token": credential["refresh_token"],
             "_state_file": str(self.state_file),
+            "_workspace_id": self.workspace_id,
+            "_workspace_state_file": str(self.workspace_state_file),
         }
 
     # ── Graph API mail reading ───────────────────────────────────
@@ -1016,6 +1124,10 @@ class GmailOAuthProvider(BaseMailProvider):
         )
         self.message_limit = max(1, int(entry.get("message_limit") or 10))
         self.state_file = Path(conf.get("state_file") or STATE_FILE)
+        self.workspace_id = str(conf.get("workspace_id") or "").strip()
+        self.workspace_state_file = Path(
+            conf.get("workspace_state_file") or DATA_DIR / "workspace_account_state.json"
+        )
         self.session = self._make_session()
 
     def _make_session(self):
@@ -1103,8 +1215,27 @@ class GmailOAuthProvider(BaseMailProvider):
                 (
                     item
                     for item in self.pool
-                    if _entry_available(
-                        _state_entry(store, item["email"], self.name)
+                    if _entry_available_for_workspace(
+                        _state_entry(store, item["email"], self.name),
+                        workspace_scoped=bool(self.workspace_id),
+                    )
+                    and (
+                        not self.workspace_id
+                        or workspace_email_available(
+                            self.workspace_state_file,
+                            self.workspace_id,
+                            item["email"],
+                        )
+                    )
+                    and (
+                        not self.workspace_id
+                        or claim_workspace_email(
+                            self.workspace_state_file,
+                            self.workspace_id,
+                            item["email"],
+                            mode="register",
+                            extra={"provider": self.name},
+                        )
                     )
                 ),
                 None,
@@ -1131,6 +1262,8 @@ class GmailOAuthProvider(BaseMailProvider):
             "client_secret": credential["client_secret"],
             "refresh_token": credential["refresh_token"],
             "_state_file": str(self.state_file),
+            "_workspace_id": self.workspace_id,
+            "_workspace_state_file": str(self.workspace_state_file),
         }
 
     def fetch_recent_messages(self, mailbox: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1441,6 +1574,20 @@ def mark_mailbox_result(
             provider=provider_name,
             extra=extra,
         )
+        workspace_id = str(mailbox.get("_workspace_id") or "").strip()
+        workspace_state_file = str(mailbox.get("_workspace_state_file") or "").strip()
+        if workspace_id and workspace_state_file:
+            set_workspace_email_state(
+                workspace_state_file,
+                workspace_id,
+                address,
+                "registered",
+                mode="register",
+                extra={
+                    "provider": provider_name,
+                    **extra,
+                },
+            )
         return
     reason = str(error or "").strip()
     if (
@@ -1475,6 +1622,29 @@ def mark_mailbox_result(
             provider=provider_name,
             extra=extra,
         )
+    workspace_id = str(mailbox.get("_workspace_id") or "").strip()
+    workspace_state_file = str(mailbox.get("_workspace_state_file") or "").strip()
+    if workspace_id and workspace_state_file:
+        state_name = (
+            "token_invalid"
+            if isinstance(error, MailProviderTokenError)
+            or "OutlookToken" in reason
+            or "GmailOAuth" in reason
+            or "access_token" in reason
+            else "failed"
+        )
+        set_workspace_email_state(
+            workspace_state_file,
+            workspace_id,
+            address,
+            state_name,
+            mode="register",
+            reason=reason[:300],
+            extra={
+                "provider": provider_name,
+                **extra,
+            },
+        )
 
 
 def release_mailbox(mailbox: dict) -> None:
@@ -1490,3 +1660,15 @@ def release_mailbox(mailbox: dict) -> None:
         state_file=Path(mailbox.get("_state_file") or STATE_FILE),
         provider=provider_name,
     )
+    workspace_id = str(mailbox.get("_workspace_id") or "").strip()
+    workspace_state_file = str(mailbox.get("_workspace_state_file") or "").strip()
+    if workspace_id and workspace_state_file:
+        set_workspace_email_state(
+            workspace_state_file,
+            workspace_id,
+            str(mailbox.get("address") or ""),
+            "failed",
+            mode="register",
+            reason="released",
+            extra={"provider": provider_name},
+        )

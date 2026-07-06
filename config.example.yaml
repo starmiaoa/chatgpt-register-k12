@@ -8,22 +8,22 @@ mail:
       message_limit: 10
       # false: one ChatGPT account per Outlook mailbox
       # true: main address + aliases, limited by alias_limit_per_mailbox
-      alias_enabled: false
+      alias_enabled: true
       alias_limit_per_mailbox: 5
       mailboxes: |
-        user1@outlook.com----password1----client_id_1----refresh_token_1
-        user2@hotmail.com----password2----client_id_2----refresh_token_2
+        user1@example.com----password1----client_id_1----refresh_token_1
+        user2@example.com----password2----client_id_2----refresh_token_2
     - type: gmail_oauth
       enable: false
       label: Gmail OAuth Pool
       imap_host: imap.gmail.com
       message_limit: 10
       mailboxes: |
-        user1@gmail.com----google_client_id----google_client_secret----google_refresh_token
+        user1@example.com----google_client_id----google_client_secret----google_refresh_token
   request_timeout: 30
   wait_timeout: 45
   wait_interval: 3
-  alias_enabled: false
+  alias_enabled: true
   alias_limit_per_mailbox: 5
 
 proxy:
@@ -50,6 +50,19 @@ workspace:
   max_retries: 3
   retry_backoff_ms: 5000
 
+workspace_state:
+  file: "data/workspace_account_state.json"
+
+existing_login:
+  mode: "email_otp"
+  fallback_to_password: false
+
+export:
+  # sub2api, auth, raw-session, cpa, cockpit, 9router, axonhub
+  format: sub2api
+  # Empty means use the default filename for the selected format.
+  output_file: ""
+
 sub2api:
   enabled: true
   output_file: "sub2api_bundle.json"
@@ -71,3 +84,7 @@ output:
 logging:
   level: INFO
   file: ""
+
+web:
+  host: "127.0.0.1"
+  port: 8787

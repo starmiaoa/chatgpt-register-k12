@@ -16,16 +16,34 @@ import json
 import logging
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from chatgpt_register_sub2api.register.mail_provider import configured_mailboxes
 from chatgpt_register_sub2api.register.registrar import register_worker
 from chatgpt_register_sub2api.workspace.joiner import join_workspaces
-from chatgpt_register_sub2api.login.login_flow import re_login_for_team_token
-from chatgpt_register_sub2api.export.sub2api import export_sub2api_json
+from chatgpt_register_sub2api.login.login_flow import (
+    PasswordRequiredError,
+    re_login_email_otp_for_team_token,
+    re_login_for_team_token,
+)
+from chatgpt_register_sub2api.export.formats import (
+    count_exported_json,
+    export_accounts_json,
+    export_format_from_config,
+    output_filename_from_config,
+)
 from chatgpt_register_sub2api.utils.proxy import normalize_proxy_url
+from chatgpt_register_sub2api.workspace_state import (
+    claim_workspace_email,
+    get_workspace_email_state,
+    list_workspace_entries,
+    set_workspace_email_state,
+    workspace_email_available,
+    workspace_state_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +72,19 @@ TOKEN_INVALID_MARKERS = (
     "authentication token has been invalidated",
     "please try signing in again",
 )
+
+
+class PipelineCancelled(RuntimeError):
+    """Raised when a WebUI job asks a running pipeline to stop."""
+
+
+def _cancel_requested(cancel_event: threading.Event | None = None) -> bool:
+    return bool(cancel_event and cancel_event.is_set())
+
+
+def _raise_if_cancelled(cancel_event: threading.Event | None = None) -> None:
+    if _cancel_requested(cancel_event):
+        raise PipelineCancelled("Task cancelled by user")
 
 
 def _now() -> str:
@@ -94,7 +125,55 @@ def _mail_config_with_proxy(config: dict[str, Any]) -> dict[str, Any]:
     proxy = str(config.get("proxy", {}).get("url", "")).strip()
     if proxy and not mail_cfg.get("proxy"):
         mail_cfg["proxy"] = proxy
+    workspace_ids = _string_list(config.get("workspace", {}).get("ids", []))
+    if workspace_ids:
+        mail_cfg["workspace_id"] = workspace_ids[0]
+        mail_cfg["workspace_state_file"] = str(workspace_state_path(config))
     return mail_cfg
+
+
+def _primary_workspace_id(config: dict[str, Any]) -> str:
+    workspace_ids = _string_list(config.get("workspace", {}).get("ids", []))
+    return workspace_ids[0] if workspace_ids else ""
+
+
+def workspace_state_entries(
+    config: dict[str, Any],
+    workspace_id: str = "",
+) -> list[dict[str, Any]]:
+    return list_workspace_entries(
+        workspace_state_path(config),
+        workspace_id or _primary_workspace_id(config),
+    )
+
+
+def preview_mailbox_candidates(
+    config: dict[str, Any],
+    count: int | None = None,
+    workspace_id: str = "",
+) -> list[dict[str, Any]]:
+    target_workspace = workspace_id or _primary_workspace_id(config)
+    state_file = workspace_state_path(config)
+    candidates: list[dict[str, Any]] = []
+    for item in configured_mailboxes(_mail_config_with_proxy(config)):
+        address = str(item.get("address") or "").strip()
+        available = (
+            not target_workspace
+            or workspace_email_available(state_file, target_workspace, address)
+        )
+        row = {
+            "provider": item.get("provider", ""),
+            "label": item.get("label", ""),
+            "address": address,
+            "base_address": item.get("base_address", address),
+            "alias_index": item.get("alias_index"),
+            "workspace_id": target_workspace,
+            "available": available,
+        }
+        candidates.append(row)
+        if count is not None and len([c for c in candidates if c["available"]]) >= count:
+            break
+    return candidates
 
 
 def _resolve_export_output_path(
@@ -104,8 +183,7 @@ def _resolve_export_output_path(
     if output_file:
         path = Path(output_file)
     else:
-        sub2api_cfg = config.get("sub2api", {})
-        configured = str(sub2api_cfg.get("output_file") or "").strip()
+        configured = output_filename_from_config(config)
         path = Path(configured) if configured else Path(f"sub2api-{_timestamp()}.json")
 
     if not path.is_absolute():
@@ -410,6 +488,27 @@ def _apply_workspace_export_context(
     account["account_user_role"] = account["workspace_account_user_role"]
 
 
+def _mark_join_verified_by_check(
+    account: dict[str, Any],
+    workspace_id: str,
+) -> None:
+    if not workspace_id:
+        return
+    account["join_status"] = "ok"
+    account["workspace_membership_active"] = True
+    results = account.get("join_results")
+    if isinstance(results, list):
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            if str(result.get("workspace_id") or "").strip() != workspace_id:
+                continue
+            result["ok"] = True
+            result["membership_active"] = True
+            result["membership_detail"] = "verified by accounts/check"
+            result["verified_by"] = "accounts_check"
+
+
 def _has_verified_workspace_context(account: dict[str, Any]) -> bool:
     return (
         bool(account.get("access_token"))
@@ -499,6 +598,102 @@ def _check_export_token_health(
     return False, f"health check failed: HTTP {resp.status_code}{suffix}"
 
 
+def _refresh_oauth_tokens_for_account(
+    session,
+    account: dict[str, Any],
+) -> tuple[bool, str]:
+    refresh_token = str(account.get("refresh_token") or "").strip()
+    if not refresh_token:
+        return False, "missing refresh_token"
+    resp = session.post(
+        "https://auth.openai.com/oauth/token",
+        data={
+            "client_id": "app_2SKx67EdpoN0G6j64rFvigXD",
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        detail = _response_excerpt(resp)
+        return (
+            False,
+            f"token refresh failed: HTTP {resp.status_code}"
+            f"{', body=' + detail if detail else ''}",
+        )
+    try:
+        data = resp.json()
+    except Exception:
+        return False, f"token refresh returned non-JSON: {_response_excerpt(resp)}"
+    access_token = str(data.get("access_token") or "").strip()
+    if not access_token:
+        return False, "token refresh returned no access_token"
+    account["access_token"] = access_token
+    new_refresh = str(data.get("refresh_token") or "").strip()
+    if new_refresh:
+        account["refresh_token"] = new_refresh
+    id_token = str(data.get("id_token") or "").strip()
+    if id_token:
+        account["id_token"] = id_token
+    return True, "ok"
+
+
+def _recover_export_token(
+    config: dict[str, Any],
+    session,
+    original: dict[str, Any],
+    export: dict[str, Any],
+    last_error: str,
+) -> tuple[bool, str]:
+    if not _token_invalidated_detail(last_error):
+        return False, last_error
+    if not hasattr(session, "post"):
+        return False, last_error
+
+    try:
+        ok, detail = _refresh_oauth_tokens_for_account(session, original)
+    except Exception as error:
+        ok = False
+        detail = str(error)
+    if ok:
+        for key in ("access_token", "refresh_token", "id_token"):
+            if original.get(key):
+                export[key] = original[key]
+        return True, "refreshed"
+
+    existing_cfg = config.get("existing_login", {})
+    if not isinstance(existing_cfg, dict):
+        existing_cfg = {}
+    if str(existing_cfg.get("mode") or "email_otp").strip().lower() != "email_otp":
+        return False, detail
+
+    email = _account_email(original)
+    if not email or email == "?":
+        return False, detail
+    mail_cfg = _mail_config_with_proxy(config)
+    if not configured_mailboxes(mail_cfg):
+        return False, detail
+    try:
+        proxy_cfg = config.get("proxy", {})
+        tokens = re_login_email_otp_for_team_token(
+            email=email,
+            mail_config=mail_cfg,
+            proxy=str(proxy_cfg.get("url", "")).strip(),
+            flaresolverr_url=str(proxy_cfg.get("flaresolverr_url", "")).strip(),
+            workspace_id="",
+        )
+    except Exception as error:
+        return False, f"{detail}; otp relogin failed: {error}"
+
+    for key in ("access_token", "refresh_token", "id_token"):
+        if tokens.get(key):
+            original[key] = tokens[key]
+            export[key] = tokens[key]
+    original["source_type"] = original.get("source_type") or "existing_login"
+    return True, "otp_relogin"
+
+
 def _filter_healthy_export_accounts(
     config: dict[str, Any],
     account_pairs: list[tuple[dict[str, Any], dict[str, Any]]],
@@ -539,6 +734,28 @@ def _filter_healthy_export_accounts(
                     break
                 if attempt < retries:
                     time.sleep(backoff_ms * attempt / 1000.0)
+            if not ok and _token_invalidated_detail(last_error):
+                recovered, recovery_detail = _recover_export_token(
+                    config,
+                    session,
+                    original,
+                    export,
+                    last_error,
+                )
+                if recovered:
+                    try:
+                        ok, last_error = _check_export_token_health(
+                            session,
+                            export,
+                            sub2api_cfg,
+                        )
+                    except Exception as error:
+                        ok = False
+                        last_error = str(error)
+                    if ok:
+                        logger.info(f"[{email}] Export health recovered via {recovery_detail}")
+                elif recovery_detail:
+                    last_error = recovery_detail
 
             checked_at = _now()
             original["export_health_checked_at"] = checked_at
@@ -566,12 +783,7 @@ def _filter_healthy_export_accounts(
 
 
 def _count_exported_accounts(json_str: str) -> int:
-    try:
-        data = json.loads(json_str)
-    except Exception:
-        return 0
-    accounts = data.get("accounts") if isinstance(data, dict) else None
-    return len(accounts) if isinstance(accounts, list) else 0
+    return count_exported_json(json_str)
 
 
 def _verify_workspace_membership(
@@ -597,6 +809,7 @@ def run_register(
     config: dict[str, Any],
     accounts_file: Path,
     count: int | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> list[dict[str, Any]]:
     """Stage 1: Register N ChatGPT accounts.
 
@@ -626,6 +839,7 @@ def run_register(
     success_count = 0
     fail_count = 0
 
+    _raise_if_cancelled(cancel_event)
     with ThreadPoolExecutor(max_workers=threads) as executor:
         futures = {
             executor.submit(
@@ -637,24 +851,35 @@ def run_register(
             ): i
             for i in range(1, total + 1)
         }
+        pending = set(futures)
 
-        for future in as_completed(futures):
-            result = future.result()
-            if result["ok"]:
-                success_count += 1
-                account = result["result"]
-                results.append(account)
-                existing.append(account)
-                save_accounts(accounts_file, existing)
-                logger.info(
-                    f"[{result['index']}/{total}] ✓ {account['email']} "
-                    f"({result.get('cost_seconds', 0):.1f}s)"
-                )
-            else:
-                fail_count += 1
-                logger.warning(
-                    f"[{result['index']}/{total}] ✗ {result.get('error', 'unknown')}"
-                )
+        while pending:
+            if _cancel_requested(cancel_event):
+                for future in pending:
+                    future.cancel()
+                logger.warning("Registration cancelled — waiting for running workers to finish")
+                raise PipelineCancelled("Registration cancelled by user")
+
+            done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+            for future in done:
+                if future.cancelled():
+                    continue
+                result = future.result()
+                if result["ok"]:
+                    success_count += 1
+                    account = result["result"]
+                    results.append(account)
+                    existing.append(account)
+                    save_accounts(accounts_file, existing)
+                    logger.info(
+                        f"[{result['index']}/{total}] ✓ {account['email']} "
+                        f"({result.get('cost_seconds', 0):.1f}s)"
+                    )
+                else:
+                    fail_count += 1
+                    logger.warning(
+                        f"[{result['index']}/{total}] ✗ {result.get('error', 'unknown')}"
+                    )
 
     logger.info(
         f"Registration complete: {success_count} success, {fail_count} failed"
@@ -662,9 +887,150 @@ def run_register(
     return results
 
 
+def run_login_existing(
+    config: dict[str, Any],
+    accounts_file: Path,
+    count: int | None = None,
+    cancel_event: threading.Event | None = None,
+) -> list[dict[str, Any]]:
+    """Log in existing ChatGPT accounts with email OTP and save fresh tokens."""
+    proxy_cfg = config.get("proxy", {})
+    proxy = str(proxy_cfg.get("url", "")).strip()
+    flaresolverr_url = str(proxy_cfg.get("flaresolverr_url", "")).strip()
+    mail_cfg = _mail_config_with_proxy(config)
+    workspace_id = _primary_workspace_id(config)
+    state_file = workspace_state_path(config)
+    total = _positive_int(count, 10) if count is not None else _positive_int(
+        config.get("registration", {}).get("total", 10),
+        10,
+    )
+    threads = _bounded_workers(
+        _parallel_threads(config, "login_threads", 1),
+        total,
+    )
+
+    candidates = [
+        item for item in configured_mailboxes(mail_cfg)
+        if not workspace_id
+        or workspace_email_available(state_file, workspace_id, item.get("address", ""))
+    ][:total]
+    logger.info(
+        f"Logging in {len(candidates)} existing account(s) with email OTP, "
+        f"{threads} worker(s)"
+    )
+
+    existing = load_accounts(accounts_file)
+    results: list[dict[str, Any]] = []
+    lock = threading.Lock()
+
+    def _login_one(candidate: dict[str, Any]) -> dict[str, Any] | None:
+        _raise_if_cancelled(cancel_event)
+        email = str(candidate.get("address") or "").strip()
+        if not email:
+            return None
+        if workspace_id and not claim_workspace_email(
+            state_file,
+            workspace_id,
+            email,
+            mode="login_existing",
+            extra={
+                "provider": candidate.get("provider", ""),
+                "base_address": candidate.get("base_address", email),
+                "alias_index": candidate.get("alias_index"),
+            },
+        ):
+            logger.info(f"[{email}] Workspace already processed — skipping login")
+            return None
+        try:
+            tokens = re_login_email_otp_for_team_token(
+                email=email,
+                mail_config=mail_cfg,
+                proxy=proxy,
+                flaresolverr_url=flaresolverr_url,
+                workspace_id="",
+            )
+            account = {
+                "email": email,
+                "password": "",
+                "access_token": tokens["access_token"],
+                "refresh_token": tokens["refresh_token"],
+                "id_token": tokens["id_token"],
+                "source_type": "existing_login",
+                "created_at": tokens.get("created_at") or _now(),
+            }
+            with lock:
+                existing.append(account)
+                results.append(account)
+                save_accounts(accounts_file, existing)
+            if workspace_id:
+                set_workspace_email_state(
+                    state_file,
+                    workspace_id,
+                    email,
+                    "logged_in",
+                    mode="login_existing",
+                    extra={
+                        "provider": candidate.get("provider", ""),
+                        "base_address": candidate.get("base_address", email),
+                        "alias_index": candidate.get("alias_index"),
+                    },
+                )
+            logger.info(f"[{email}] ✓ Existing account logged in")
+            return account
+        except PasswordRequiredError as error:
+            if workspace_id:
+                set_workspace_email_state(
+                    state_file,
+                    workspace_id,
+                    email,
+                    "otp_login_unavailable",
+                    mode="login_existing",
+                    reason=str(error),
+                )
+            logger.warning(f"[{email}] ✗ OTP login unavailable: {error}")
+        except Exception as error:
+            if workspace_id:
+                set_workspace_email_state(
+                    state_file,
+                    workspace_id,
+                    email,
+                    "failed",
+                    mode="login_existing",
+                    reason=str(error),
+                )
+            logger.warning(f"[{email}] ✗ Existing login failed: {error}")
+        return None
+
+    if threads == 1 or len(candidates) <= 1:
+        for candidate in candidates:
+            _raise_if_cancelled(cancel_event)
+            _login_one(candidate)
+    else:
+        with ThreadPoolExecutor(max_workers=threads) as executor:
+            futures = [executor.submit(_login_one, candidate) for candidate in candidates]
+            pending = set(futures)
+            while pending:
+                if _cancel_requested(cancel_event):
+                    for future in pending:
+                        future.cancel()
+                    logger.warning("Existing-account login cancelled")
+                    raise PipelineCancelled("Existing-account login cancelled by user")
+                done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+                for future in done:
+                    if not future.cancelled():
+                        future.result()
+
+    logger.info(
+        f"Existing account login complete: {len(results)} success, "
+        f"{len(candidates) - len(results)} failed/skipped"
+    )
+    return results
+
+
 def run_join_workspace(
     config: dict[str, Any],
     accounts: list[dict[str, Any]],
+    cancel_event: threading.Event | None = None,
 ) -> list[dict[str, Any]]:
     """Stage 2: Join each account to the K12 parent workspace.
 
@@ -693,14 +1059,22 @@ def run_join_workspace(
         f"Joining {len(accounts)} accounts to {len(workspace_ids)} "
         f"workspace(s), {threads} worker(s)"
     )
+    state_file = workspace_state_path(config)
 
     def _join_one(account: dict[str, Any]) -> dict[str, Any]:
+        _raise_if_cancelled(cancel_event)
         email = account.get("email", "?")
         access_token = account.get("access_token", "")
         if not access_token:
             logger.warning(f"[{email}] No access_token — skipping join")
             account["join_status"] = "skipped"
             return account
+        if len(workspace_ids) == 1:
+            entry = get_workspace_email_state(state_file, workspace_ids[0], email)
+            if isinstance(entry, dict) and str(entry.get("state") or "") == "exported":
+                logger.info(f"[{email}] Already exported for workspace — skipping join")
+                account["join_status"] = "skipped"
+                return account
 
         results = join_workspaces(
             access_token=access_token,
@@ -712,43 +1086,56 @@ def run_join_workspace(
         )
 
         request_ok = all(r["ok"] for r in results)
-        membership_ok = request_ok
+        membership_ok = False
 
-        if request_ok:
-            verify_session = None
-            try:
-                verify_session = _create_http_session(proxy)
-                membership_map: dict[str, tuple[bool, str]] = {}
-                for ws_id in workspace_ids:
-                    membership_map[ws_id] = _verify_workspace_membership(
-                        verify_session,
-                        access_token,
-                        ws_id,
-                    )
-                for result in results:
-                    active, detail = membership_map.get(
-                        str(result.get("workspace_id") or ""),
-                        (False, "workspace verification missing"),
-                    )
-                    result["membership_active"] = active
-                    if detail:
-                        result["membership_detail"] = detail
-                membership_ok = all(active for active, _ in membership_map.values())
-            except Exception as e:
-                membership_ok = False
-                for result in results:
-                    result["membership_active"] = False
-                    result["membership_detail"] = f"verification error: {e}"
-            finally:
-                if verify_session:
-                    verify_session.close()
+        verify_session = None
+        try:
+            verify_session = _create_http_session(proxy)
+            membership_map: dict[str, tuple[bool, str]] = {}
+            for ws_id in workspace_ids:
+                membership_map[ws_id] = _verify_workspace_membership(
+                    verify_session,
+                    access_token,
+                    ws_id,
+                )
+            for result in results:
+                result["request_ok"] = bool(result.get("ok"))
+                active, detail = membership_map.get(
+                    str(result.get("workspace_id") or ""),
+                    (False, "workspace verification missing"),
+                )
+                result["membership_active"] = active
+                if active and not result.get("ok"):
+                    result["ok"] = True
+                    result["membership_detail"] = "verified by membership check"
+                elif detail:
+                    result["membership_detail"] = detail
+            membership_ok = all(active for active, _ in membership_map.values())
+        except Exception as e:
+            membership_ok = False
+            for result in results:
+                result["request_ok"] = bool(result.get("ok"))
+                result["membership_active"] = False
+                result["membership_detail"] = f"verification error: {e}"
+        finally:
+            if verify_session:
+                verify_session.close()
 
-        all_ok = request_ok and membership_ok
+        all_ok = membership_ok or request_ok
         account["join_status"] = "ok" if all_ok else "failed"
         account["join_results"] = results
         account["workspace_membership_active"] = membership_ok
 
         if all_ok:
+            for ws_id in workspace_ids:
+                set_workspace_email_state(
+                    state_file,
+                    ws_id,
+                    email,
+                    "joined",
+                    mode=str(account.get("source_type") or "account"),
+                    extra={"join_status": "ok"},
+                )
             logger.info(f"[{email}] ✓ Joined {len(workspace_ids)} workspace(s)")
         else:
             errors = [
@@ -758,19 +1145,39 @@ def run_join_workspace(
                 for r in results
                 if (not r["ok"]) or not r.get("membership_active", request_ok)
             ]
+            for ws_id in workspace_ids:
+                set_workspace_email_state(
+                    state_file,
+                    ws_id,
+                    email,
+                    "failed",
+                    mode=str(account.get("source_type") or "account"),
+                    reason=", ".join(str(e) for e in errors)[:300],
+                    extra={"join_status": "failed"},
+                )
             logger.warning(f"[{email}] ✗ Join failed: {', '.join(errors)}")
 
         return account
 
     if threads == 1 or len(accounts) <= 1:
         for account in accounts:
+            _raise_if_cancelled(cancel_event)
             _join_one(account)
         return accounts
 
     with ThreadPoolExecutor(max_workers=threads) as executor:
         futures = [executor.submit(_join_one, account) for account in accounts]
-        for future in as_completed(futures):
-            future.result()
+        pending = set(futures)
+        while pending:
+            if _cancel_requested(cancel_event):
+                for future in pending:
+                    future.cancel()
+                logger.warning("Workspace join cancelled")
+                raise PipelineCancelled("Workspace join cancelled by user")
+            done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+            for future in done:
+                if not future.cancelled():
+                    future.result()
 
     return accounts
 
@@ -778,6 +1185,7 @@ def run_join_workspace(
 def run_re_login(
     config: dict[str, Any],
     accounts: list[dict[str, Any]],
+    cancel_event: threading.Event | None = None,
 ) -> list[dict[str, Any]]:
     """Stage 3: Re-login each account with Team space selection.
 
@@ -810,6 +1218,7 @@ def run_re_login(
     )
 
     def _login_one(account: dict[str, Any]) -> dict[str, Any]:
+        _raise_if_cancelled(cancel_event)
         email = account.get("email", "")
         password = account.get("password", "")
         join_status = account.get("join_status", "")
@@ -889,13 +1298,23 @@ def run_re_login(
 
     if threads == 1 or len(accounts) <= 1:
         for account in accounts:
+            _raise_if_cancelled(cancel_event)
             _login_one(account)
         return accounts
 
     with ThreadPoolExecutor(max_workers=threads) as executor:
         futures = [executor.submit(_login_one, account) for account in accounts]
-        for future in as_completed(futures):
-            future.result()
+        pending = set(futures)
+        while pending:
+            if _cancel_requested(cancel_event):
+                for future in pending:
+                    future.cancel()
+                logger.warning("Team re-login cancelled")
+                raise PipelineCancelled("Team re-login cancelled by user")
+            done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+            for future in done:
+                if not future.cancelled():
+                    future.result()
 
     return accounts
 
@@ -903,6 +1322,7 @@ def run_re_login(
 def run_refresh_tokens(
     config: dict[str, Any],
     accounts: list[dict[str, Any]],
+    cancel_event: threading.Event | None = None,
 ) -> list[dict[str, Any]]:
     """Refresh access tokens and enrich with workspace info from check API.
 
@@ -926,8 +1346,10 @@ def run_refresh_tokens(
         f"Refreshing tokens and checking account info for {len(accounts)} "
         f"accounts, {threads} worker(s)"
     )
+    state_file = workspace_state_path(config)
 
     def _refresh_one(account: dict[str, Any]) -> dict[str, Any]:
+        _raise_if_cancelled(cancel_event)
         email = account.get("email", "")
         rt = account.get("refresh_token", "")
 
@@ -992,6 +1414,18 @@ def run_refresh_tokens(
                         active_workspace_id,
                         str(account.get("plan_type") or workspace_plan),
                     )
+                context_account_id = str(context.get("chatgpt_account_id") or "").strip()
+                if (
+                    workspace_ids
+                    and context_account_id in workspace_ids
+                    and _is_workspace_plan(context.get("plan_type", ""))
+                ):
+                    _mark_join_verified_by_check(account, context_account_id)
+                    _apply_workspace_export_context(
+                        account,
+                        context_account_id,
+                        str(context.get("plan_type") or workspace_plan),
+                    )
                 logger.info(
                     f"[{email}] Check API: "
                     f"plan={context.get('plan_type', '')} "
@@ -1005,12 +1439,53 @@ def run_refresh_tokens(
                         f"account_id={account.get('workspace_chatgpt_account_id')}"
                     )
                 _mark_refresh_status(account, "ok")
+                checked_workspace_id = (
+                    str(account.get("workspace_chatgpt_account_id") or "")
+                    or active_workspace_id
+                    or (workspace_ids[0] if workspace_ids else "")
+                )
+                if checked_workspace_id:
+                    set_workspace_email_state(
+                        state_file,
+                        checked_workspace_id,
+                        email,
+                        "checked",
+                        mode=str(account.get("source_type") or "account"),
+                        extra={
+                            "plan_type": account.get("workspace_plan_type")
+                            or account.get("plan_type", ""),
+                            "chatgpt_account_id": account.get(
+                                "workspace_chatgpt_account_id"
+                            )
+                            or account.get("chatgpt_account_id", ""),
+                            "account_user_role": account.get(
+                                "workspace_account_user_role"
+                            )
+                            or account.get("account_user_role", ""),
+                            "join_status": account.get("join_status", ""),
+                            "join_verified_by": (
+                                "accounts_check"
+                                if account.get("join_status") == "ok"
+                                else ""
+                            ),
+                        },
+                    )
             else:
                 _mark_refresh_status(account, "failed", "missing access_token after refresh")
 
         except Exception as e:
             detail = str(e)
             _mark_refresh_status(account, "failed", detail)
+            for ws_id in workspace_ids[:1]:
+                set_workspace_email_state(
+                    state_file,
+                    ws_id,
+                    email,
+                    "failed",
+                    mode=str(account.get("source_type") or "account"),
+                    reason=detail,
+                    extra={"refresh_status": "failed"},
+                )
             logger.warning(f"[{email}] Refresh/check error: {detail}")
         finally:
             if session:
@@ -1020,13 +1495,23 @@ def run_refresh_tokens(
 
     if threads == 1 or len(accounts) <= 1:
         for account in accounts:
+            _raise_if_cancelled(cancel_event)
             _refresh_one(account)
         return accounts
 
     with ThreadPoolExecutor(max_workers=threads) as executor:
         futures = [executor.submit(_refresh_one, account) for account in accounts]
-        for future in as_completed(futures):
-            future.result()
+        pending = set(futures)
+        while pending:
+            if _cancel_requested(cancel_event):
+                for future in pending:
+                    future.cancel()
+                logger.warning("Refresh/check cancelled")
+                raise PipelineCancelled("Refresh/check cancelled by user")
+            done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+            for future in done:
+                if not future.cancelled():
+                    future.result()
 
     return accounts
 
@@ -1036,7 +1521,7 @@ def run_export(
     accounts: list[dict[str, Any]],
     output_file: Path | None = None,
 ) -> tuple[str, str]:
-    """Stage 4: Export accounts as sub2api JSON.
+    """Stage 4: Export accounts as the configured JSON target.
 
     Uses team-scoped tokens (team_access_token) when available,
     falls back to personal tokens.
@@ -1106,9 +1591,41 @@ def run_export(
     export_accounts = [export for _, export in export_pairs]
 
     output_path = _resolve_export_output_path(config, output_file)
+    export_format = export_format_from_config(config)
 
-    json_str, actual_path = export_sub2api_json(export_accounts, output_path)
-    logger.info(f"Exported {len(export_accounts)} accounts to {actual_path}")
+    json_str, actual_path = export_accounts_json(
+        export_accounts,
+        output_path,
+        export_format,
+    )
+    state_file = workspace_state_path(config)
+    for account in export_accounts:
+        email = _account_email(account)
+        workspace_id = str(
+            account.get("workspace_chatgpt_account_id")
+            or account.get("chatgpt_account_id")
+            or _primary_workspace_id(config)
+            or ""
+        ).strip()
+        if workspace_id and email and email != "?":
+            set_workspace_email_state(
+                state_file,
+                workspace_id,
+                email,
+                "exported",
+                mode=str(account.get("source_type") or "export"),
+                extra={
+                    "plan_type": account.get("workspace_plan_type")
+                    or account.get("plan_type", ""),
+                    "chatgpt_account_id": workspace_id,
+                    "account_user_role": account.get("workspace_account_user_role")
+                    or account.get("account_user_role", ""),
+                    "output_file": str(actual_path),
+                },
+            )
+    logger.info(
+        f"Exported {len(export_accounts)} accounts as {export_format} to {actual_path}"
+    )
     return json_str, actual_path
 
 
@@ -1120,6 +1637,7 @@ def run_full_pipeline(
     count: int | None = None,
     output_file: str | None = None,
     accounts_file: str | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     """Run the complete pipeline: register → join → re-login → export.
 
@@ -1141,7 +1659,8 @@ def run_full_pipeline(
     logger.info("=" * 60)
 
     # Stage 1: Register
-    new_accounts = run_register(config, af, count=count)
+    _raise_if_cancelled(cancel_event)
+    new_accounts = run_register(config, af, count=count, cancel_event=cancel_event)
     if not new_accounts:
         logger.error("No accounts registered — pipeline aborted")
         return {
@@ -1154,20 +1673,32 @@ def run_full_pipeline(
         }
 
     # Stage 2: Join workspace
-    joined_accounts = run_join_workspace(config, new_accounts)
+    _raise_if_cancelled(cancel_event)
+    joined_accounts = run_join_workspace(config, new_accounts, cancel_event=cancel_event)
     save_accounts(af, joined_accounts)
 
     re_login_enabled = config.get("workspace", {}).get("re_login_enabled", False)
     if re_login_enabled:
         # Stage 3a: Explicit team re-login. Only team-token successes are exported.
-        refreshed_accounts = run_re_login(config, joined_accounts)
+        _raise_if_cancelled(cancel_event)
+        refreshed_accounts = run_re_login(
+            config,
+            joined_accounts,
+            cancel_event=cancel_event,
+        )
         save_accounts(af, refreshed_accounts)
     else:
         # Stage 3b: Default refresh/check path for personal registration tokens.
-        refreshed_accounts = run_refresh_tokens(config, joined_accounts)
+        _raise_if_cancelled(cancel_event)
+        refreshed_accounts = run_refresh_tokens(
+            config,
+            joined_accounts,
+            cancel_event=cancel_event,
+        )
         save_accounts(af, refreshed_accounts)
 
     # Stage 4: Export (uses plan_type and account_id from check API)
+    _raise_if_cancelled(cancel_event)
     all_accounts = load_accounts(af)
     if re_login_enabled:
         all_accounts = [
@@ -1190,6 +1721,7 @@ def run_full_pipeline(
 
     try:
         json_str, actual_output = run_export(config, all_accounts, of)
+        save_accounts(af, all_accounts)
     except RuntimeError as error:
         logger.error(f"Export aborted: {error}")
         return {

@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ChatGPT Register Sub2API</title>
+    <link rel="stylesheet" href="/static/style.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>ChatGPT Register Sub2API</h1>
+          <p id="health">Connecting...</p>
+        </div>
+        <button id="refreshJobs" type="button">刷新</button>
+      </header>
+
+      <section class="grid">
+        <form id="configForm" class="panel">
+          <h2>配置</h2>
+          <label>配置文件 <input name="config_path" value="config.yaml"></label>
+          <label>Workspace ID（一行一个） <textarea name="workspace_ids" rows="3" spellcheck="false" placeholder="workspace uuid&#10;workspace uuid"></textarea></label>
+          <label>代理 <input name="proxy_url" placeholder="socks5://127.0.0.1:7897"></label>
+          <label>导出格式
+            <select name="export_format">
+              <option value="sub2api" selected>Sub2API（默认）</option>
+              <option value="auth">auth.json</option>
+              <option value="raw-session">Session JSON</option>
+              <option value="cpa">CPA</option>
+              <option value="cockpit">Cockpit</option>
+              <option value="9router">9router</option>
+              <option value="axonhub">AxonHub</option>
+            </select>
+          </label>
+          <div class="row">
+            <label>数量 <input name="count" type="number" min="1" value="10"></label>
+            <label>线程 <input name="threads" type="number" min="1" value="2"></label>
+            <label>别名上限 <input name="alias_limit_per_mailbox" type="number" min="1" value="5"></label>
+          </div>
+          <label class="switch"><span>启用 Outlook 别名</span><input name="alias_enabled" type="checkbox" checked></label>
+          <label>Outlook 邮箱池（格式：邮箱----邮箱密码----client_id----refresh_token，一行一个） <textarea name="outlook_mailboxes" rows="8" spellcheck="false" placeholder="user@example.com----password----client_id----refresh_token"></textarea></label>
+          <div class="actions">
+            <button type="button" data-action="save-config">保存配置</button>
+            <button type="button" data-action="preview">预览候选</button>
+          </div>
+        </form>
+
+        <section class="panel">
+          <h2>选择账号来源</h2>
+          <p class="hint">两种模式都会加入 Workspace、刷新/校验 Token，并导出 Sub2API JSON。</p>
+          <div class="mode-list" role="radiogroup" aria-label="任务模式">
+            <label class="mode-option">
+              <input name="job_mode" type="radio" value="run" checked>
+              <span>
+                <strong>注册新账号</strong>
+                <small>邮箱未注册 ChatGPT：从邮箱池/别名创建账号后导出。</small>
+              </span>
+            </label>
+            <label class="mode-option">
+              <input name="job_mode" type="radio" value="existing-token">
+              <span>
+                <strong>登录已有账号换 Token</strong>
+                <small>邮箱已有 ChatGPT 账号或旧 token 401：验证码登录后导出新 token。</small>
+              </span>
+            </label>
+          </div>
+          <div class="job-controls">
+            <button id="startSelectedJob" class="primary-action" type="button">开始完整流程</button>
+            <button id="cancelJob" class="secondary danger" type="button" disabled>中断当前任务</button>
+          </div>
+        </section>
+      </section>
+
+      <section class="panel status">
+        <h2>当前任务</h2>
+        <pre id="jobStatus">{}</pre>
+      </section>
+
+      <section class="panel">
+        <h2>日志</h2>
+        <pre id="logs" class="logs"></pre>
+      </section>
+
+      <section class="panel">
+        <h2>终端</h2>
+        <div class="terminal-input">
+          <input id="terminalCommand" spellcheck="false" placeholder="python -m chatgpt_register_sub2api.cli --help">
+          <button id="runTerminal" type="button">运行</button>
+        </div>
+        <pre id="terminalOutput" class="terminal"></pre>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

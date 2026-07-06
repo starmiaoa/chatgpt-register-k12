@@ -1,7 +1,7 @@
 [project]
 name = "chatgpt-register-sub2api"
 version = "0.1.0"
-description = "ChatGPT 账号自动注册 + K12 母号加入 + Sub2API JSON 导出"
+description = "ChatGPT 账号自动注册 + K12 母号加入 + 多格式 JSON 导出"
 requires-python = ">=3.11"
 dependencies = [
     "curl-cffi>=0.8.0",
@@ -17,3 +17,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["chatgpt_register_sub2api"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"chatgpt_register_sub2api/webui/static" = "chatgpt_register_sub2api/webui/static"

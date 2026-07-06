@@ -22,7 +22,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
                 "enable": True,
                 "label": "Outlook Pool",
                 "mode": "auto",
-                "alias_enabled": False,
+                "alias_enabled": True,
                 "alias_limit_per_mailbox": 5,
                 "mailboxes": "",
             },
@@ -38,7 +38,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "request_timeout": 30,
         "wait_timeout": 30,
         "wait_interval": 2,
-        "alias_enabled": False,
+        "alias_enabled": True,
         "alias_limit_per_mailbox": 5,
     },
     "proxy": {
@@ -63,6 +63,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_retries": 3,
         "retry_backoff_ms": 5000,
     },
+    "workspace_state": {
+        "file": "data/workspace_account_state.json",
+    },
+    "existing_login": {
+        "mode": "email_otp",
+        "fallback_to_password": False,
+    },
+    "export": {
+        "format": "sub2api",
+        "output_file": "",
+    },
     "sub2api": {
         "enabled": True,
         "output_file": "sub2api_bundle.json",
@@ -81,6 +92,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "logging": {
         "level": "INFO",
         "file": "",
+    },
+    "web": {
+        "host": "127.0.0.1",
+        "port": 8787,
     },
 }
 

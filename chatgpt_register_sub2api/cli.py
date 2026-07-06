@@ -6,8 +6,9 @@ Subcommands:
   join-workspace   Join registered accounts to K12 workspace
   refresh          Refresh/check existing accounts
   login-team       Re-login with Team space selection
-  export           Export to sub2api JSON
+  export           Export accounts JSON
   run              Full pipeline (register → join → login → export)
+  web              Start local WebUI
 """
 
 from __future__ import annotations
@@ -23,6 +24,10 @@ from chatgpt_register_sub2api.config import (
     generate_default_config,
     load_config,
 )
+from chatgpt_register_sub2api.export.formats import (
+    output_filename_from_config,
+    supported_export_formats,
+)
 from chatgpt_register_sub2api.pipeline import (
     create_run_output_dir,
     load_accounts,
@@ -34,6 +39,7 @@ from chatgpt_register_sub2api.pipeline import (
     run_register,
     save_accounts,
 )
+from chatgpt_register_sub2api.webui.server import run_server
 
 
 def setup_logging(config: dict, verbose: bool = False) -> None:
@@ -98,10 +104,7 @@ def _prepare_run_archive(config: dict, args) -> tuple[Path | None, Path | None, 
         return None, Path(args.accounts) if args.accounts else None, Path(args.output) if args.output else None
 
     run_dir = create_run_output_dir(config, args.count)
-    sub2api_cfg = config.get("sub2api", {})
-    default_output = str(
-        sub2api_cfg.get("output_file") or "sub2api_bundle.json"
-    ).strip() or "sub2api_bundle.json"
+    default_output = output_filename_from_config(config)
     accounts_file = _path_under_run_dir(
         run_dir,
         args.accounts,
@@ -250,6 +253,8 @@ def cmd_refresh(args) -> int:
 def cmd_export(args) -> int:
     """Export to sub2api JSON."""
     config = load_config(args.config)
+    if args.format:
+        config.setdefault("export", {})["format"] = args.format
     setup_logging(config, args.verbose)
     logger = logging.getLogger(__name__)
 
@@ -267,6 +272,7 @@ def cmd_export(args) -> int:
     except RuntimeError as error:
         print(f"Export failed: {error}", file=sys.stderr)
         return 1
+    save_accounts(input_file, accounts)
 
     if args.stdout:
         print(json_str)
@@ -279,6 +285,8 @@ def cmd_export(args) -> int:
 def cmd_run(args) -> int:
     """Run the full pipeline."""
     config = load_config(args.config)
+    if args.format:
+        config.setdefault("export", {})["format"] = args.format
     _apply_threads_override(
         config,
         args.threads,
@@ -318,10 +326,25 @@ def cmd_run(args) -> int:
     return 0 if summary["exported"] > 0 else 1
 
 
+def cmd_web(args) -> int:
+    config = load_config(args.config)
+    setup_logging(config, verbose=args.verbose)
+    web_cfg = config.get("web", {})
+    host = args.host or str(web_cfg.get("host") or "127.0.0.1")
+    port = args.port or int(web_cfg.get("port") or 8787)
+    run_server(
+        config_path=args.config or DEFAULT_CONFIG_FILE,
+        host=host,
+        port=port,
+        open_browser=args.open,
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="chatgpt-register",
-        description="ChatGPT 账号注册 + K12 母号加入 + Sub2API JSON 导出",
+        description="ChatGPT 账号注册 + K12 母号加入 + 多格式 JSON 导出",
     )
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
@@ -369,11 +392,17 @@ def main(argv: list[str] | None = None) -> None:
     p_refresh.set_defaults(func=cmd_refresh)
 
     # ── export ──
-    p_export = sub.add_parser("export", help="Export sub2api JSON")
+    p_export = sub.add_parser("export", help="Export accounts JSON")
     p_export.add_argument("--config", "-c", default=None, help="Config file path")
     p_export.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
     p_export.add_argument("--output", "-o", default=None, help="Output file path")
     p_export.add_argument("--input", "-i", default=None, help="Input accounts JSON")
+    p_export.add_argument(
+        "--format",
+        choices=supported_export_formats(),
+        default=None,
+        help="Export format (default: config export.format, usually sub2api)",
+    )
     p_export.add_argument("--stdout", action="store_true", help="Print to stdout")
     p_export.set_defaults(func=cmd_export)
 
@@ -383,10 +412,25 @@ def main(argv: list[str] | None = None) -> None:
     p_run.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
     p_run.add_argument("--count", "-n", type=int, default=None, help="Number of accounts")
     p_run.add_argument("--workspace-id", action="append", default=None, help="Workspace UUID (repeatable)")
-    p_run.add_argument("--output", "-o", default=None, help="Output sub2api JSON file")
+    p_run.add_argument("--output", "-o", default=None, help="Output JSON file")
+    p_run.add_argument(
+        "--format",
+        choices=supported_export_formats(),
+        default=None,
+        help="Export format (default: config export.format, usually sub2api)",
+    )
     p_run.add_argument("--accounts", default=None, help="Accounts store JSON file")
     p_run.add_argument("--threads", "-t", type=int, default=None, help="Workers per pipeline stage")
     p_run.set_defaults(func=cmd_run)
+
+    # ── web ──
+    p_web = sub.add_parser("web", help="Start local WebUI")
+    p_web.add_argument("--config", "-c", default=None, help="Config file path")
+    p_web.add_argument("--host", default=None, help="Bind host")
+    p_web.add_argument("--port", type=int, default=None, help="Bind port")
+    p_web.add_argument("--open", action="store_true", help="Open browser")
+    p_web.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
+    p_web.set_defaults(func=cmd_web)
 
     args = parser.parse_args(argv)
     if not args.command:

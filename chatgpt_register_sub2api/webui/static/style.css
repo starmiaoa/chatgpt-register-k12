@@ -1,0 +1,317 @@
+:root {
+  color-scheme: light dark;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #f5f7fa;
+  color: #1f2933;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+.shell {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 22px;
+  font-weight: 700;
+}
+
+h2 {
+  font-size: 16px;
+  margin-bottom: 12px;
+}
+
+p {
+  color: #607080;
+  font-size: 13px;
+  margin-top: 4px;
+}
+
+.hint {
+  margin: -4px 0 12px;
+  line-height: 1.5;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(280px, 0.8fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.panel {
+  background: #ffffff;
+  border: 1px solid #d9e2ec;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+label {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.check,
+.switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.switch {
+  justify-content: flex-start;
+  width: fit-content;
+}
+
+.switch input,
+.check input {
+  width: auto;
+  margin: 0;
+}
+
+input,
+textarea,
+select,
+button {
+  font: inherit;
+}
+
+input,
+textarea,
+select {
+  width: 100%;
+  border: 1px solid #bcccdc;
+  border-radius: 6px;
+  padding: 9px 10px;
+  background: #ffffff;
+  color: #1f2933;
+}
+
+textarea {
+  resize: vertical;
+  min-height: 170px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+}
+
+button {
+  border: 1px solid #1f6feb;
+  border-radius: 6px;
+  padding: 9px 12px;
+  background: #1f6feb;
+  color: #ffffff;
+  cursor: pointer;
+  min-height: 38px;
+}
+
+button:hover {
+  background: #195fc8;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+button.secondary {
+  background: transparent;
+  border-color: #8aa2b8;
+  color: #1f2933;
+}
+
+button.secondary:hover:not(:disabled) {
+  background: #edf2f7;
+}
+
+button.danger {
+  border-color: #d64545;
+  color: #d64545;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.actions.vertical {
+  display: grid;
+  grid-template-columns: 1fr;
+}
+
+.mode-list {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.mode-option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  margin: 0;
+  padding: 10px 0;
+  border-top: 1px solid #d9e2ec;
+  cursor: pointer;
+}
+
+.mode-option:last-child {
+  border-bottom: 1px solid #d9e2ec;
+}
+
+.mode-option input {
+  width: auto;
+  margin: 3px 0 0;
+}
+
+.mode-option strong,
+.mode-option small {
+  display: block;
+}
+
+.mode-option strong {
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.mode-option small {
+  color: #607080;
+  font-weight: 500;
+  line-height: 1.45;
+  margin-top: 4px;
+}
+
+.primary-action {
+  width: 100%;
+}
+
+.job-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+}
+
+.logs {
+  min-height: 260px;
+  max-height: 420px;
+  overflow: auto;
+  background: #101820;
+  color: #d9e2ec;
+  border-radius: 6px;
+  padding: 12px;
+}
+
+.terminal-input {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.terminal {
+  min-height: 220px;
+  max-height: 360px;
+  overflow: auto;
+  background: #07111d;
+  color: #d9e2ec;
+  border-radius: 6px;
+  padding: 12px;
+}
+
+@media (max-width: 820px) {
+  .grid,
+  .row {
+    grid-template-columns: 1fr;
+  }
+
+  .topbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .terminal-input {
+    grid-template-columns: 1fr;
+  }
+
+  .job-controls {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    background: #101820;
+    color: #d9e2ec;
+  }
+
+  .panel {
+    background: #17212b;
+    border-color: #304255;
+  }
+
+  .mode-option {
+    border-color: #304255;
+  }
+
+  .mode-option small,
+  .hint {
+    color: #aebdcc;
+  }
+
+  input,
+  textarea,
+  select {
+    background: #101820;
+    border-color: #42566c;
+    color: #d9e2ec;
+  }
+
+  button.secondary {
+    color: #d9e2ec;
+  }
+
+  button.secondary:hover:not(:disabled) {
+    background: #223244;
+  }
+}
